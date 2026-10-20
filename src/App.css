@@ -1695,4 +1695,487 @@ html[data-theme="light"] .explorer-status-bar {
   accent-color: var(--accent);
 }
 
+/* ---------- 9단계: 확대 보간 (픽셀 그대로) ---------- */
+.viewer-image.is-pixelated {
+  image-rendering: pixelated !important;
+}
+
+/* ---------- 9단계: 슬라이드쇼 남은 시간 뱃지 ---------- */
+.slideshow-badge {
+  position: absolute;
+  bottom: 24px;
+  right: 24px;
+  z-index: 15;
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 16px;
+  border-radius: 20px;
+  background: hsl(0 0% 0% / 0.75);
+  border: 1px solid var(--glass-border);
+  color: var(--fg);
+  font-size: 13px;
+  font-weight: 600;
+  backdrop-filter: blur(8px);
+  pointer-events: none;
+  transition: opacity 300ms ease-out;
+}
+
+.slideshow-badge.is-faded {
+  opacity: 0;
+}
+
+/* ---------- 9단계: 설정 모달 탭 바 ---------- */
+.settings-tab-bar {
+  display: flex;
+  gap: 6px;
+  border-bottom: 1px solid var(--glass-border);
+  padding-bottom: 8px;
+  margin-bottom: 12px;
+}
+
+.settings-tab-btn {
+  padding: 6px 14px;
+  border-radius: 6px;
+  border: none;
+  background: transparent;
+  color: var(--fg-dim);
+  font-size: 13px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: all 120ms ease;
+}
+
+.settings-tab-btn:hover {
+  color: var(--fg);
+  background: var(--glass);
+}
+
+.settings-tab-btn.is-active {
+  color: var(--accent);
+  background: var(--glass-hover);
+  font-weight: 600;
+}
+
+/* ---------- 9단계: 정렬 드롭다운 메뉴 ---------- */
+.sort-dropdown-menu {
+  position: absolute;
+  z-index: 50;
+  min-width: 170px;
+  background: hsl(220 25% 12% / 0.96);
+  border: 1px solid var(--glass-border);
+  border-radius: 8px;
+  padding: 6px 0;
+  box-shadow: 0 10px 30px hsl(0 0% 0% / 0.5);
+  backdrop-filter: blur(12px);
+  animation: fade-in 100ms ease-out;
+}
+
+.sort-menu-item {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 7px 14px;
+  background: transparent;
+  border: none;
+  color: var(--fg);
+  font-size: 12.5px;
+  text-align: left;
+  cursor: pointer;
+}
+
+.sort-menu-item:hover {
+  background: var(--glass-hover);
+  color: var(--accent);
+}
+
+.sort-menu-item.is-active {
+  color: var(--accent);
+  font-weight: 600;
+}
+
+.sort-menu-sep {
+  height: 1px;
+  background: var(--glass-border);
+  margin: 4px 0;
+}
+
+/* ---------- 9단계: 크기 조정 & 다른 이름으로 저장 모달 폼 ---------- */
+.modal-form-group {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  text-align: left;
+}
+
+.modal-form-label {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--fg-dim);
+}
+
+.modal-form-input,
+.modal-form-select {
+  padding: 7px 10px;
+  background: hsl(220 20% 8% / 0.7);
+  border: 1px solid var(--glass-border);
+  border-radius: 6px;
+  color: var(--fg);
+  font-size: 13px;
+  outline: none;
+}
+
+.modal-form-input:focus,
+.modal-form-select:focus {
+  border-color: var(--accent);
+}
+
+.preset-buttons-row {
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+.preset-btn {
+  padding: 4px 10px;
+  font-size: 12px;
+  border-radius: 4px;
+}
+
+/* ---------- 10단계: 파일 관리 & 외부 연동 & 최근 항목·즐겨찾기 ---------- */
+
+/* 최근 항목 드롭다운 (열기 버튼 옆) */
+.open-btn-wrapper {
+  display: inline-flex;
+  align-items: center;
+  position: relative;
+}
+
+.toolbar-recent-trigger {
+  padding: 0 4px !important;
+  margin-left: -2px;
+  border-top-left-radius: 0 !important;
+  border-bottom-left-radius: 0 !important;
+  height: 28px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.recent-dropdown-popup {
+  position: absolute;
+  top: 34px;
+  left: 0;
+  min-width: 260px;
+  max-width: 380px;
+  background: var(--glass-surface);
+  backdrop-filter: blur(20px);
+  -webkit-backdrop-filter: blur(20px);
+  border: 1px solid var(--glass-border);
+  border-radius: 8px;
+  box-shadow: 0 10px 30px rgba(0, 0, 0, 0.4);
+  padding: 6px;
+  z-index: 1000;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.recent-dropdown-header {
+  font-size: 11px;
+  font-weight: 700;
+  color: var(--fg-dim);
+  padding: 4px 8px;
+  text-transform: uppercase;
+  border-bottom: 1px solid var(--glass-border);
+  margin-bottom: 4px;
+}
+
+.recent-item-btn {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 8px;
+  border: none;
+  background: transparent;
+  color: var(--fg);
+  font-size: 12.5px;
+  border-radius: 4px;
+  cursor: pointer;
+  text-align: left;
+  transition: all 120ms ease;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.recent-item-btn:hover {
+  background: var(--glass-hover);
+}
+
+.recent-item-btn.is-missing {
+  opacity: 0.45;
+  text-decoration: line-through;
+}
+
+.recent-item-name {
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.recent-empty {
+  font-size: 12px;
+  color: var(--fg-dim);
+  padding: 10px 8px;
+  text-align: center;
+}
+
+/* 탐색기 파일 형식 필터 드롭다운 */
+.explorer-filter-container {
+  display: inline-flex;
+  align-items: center;
+  margin-left: 4px;
+}
+
+.explorer-filter-select {
+  height: 28px;
+  font-size: 12px;
+  padding: 2px 8px;
+  background: var(--glass-surface);
+  color: var(--fg);
+  border: 1px solid var(--glass-border);
+  border-radius: 6px;
+  cursor: pointer;
+  outline: none;
+}
+
+.explorer-filter-select:hover {
+  background: var(--glass-hover);
+}
+
+/* 즐겨찾기 섹션 (폴더 트리 좌측) */
+.fav-item-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 4px 8px;
+  border-radius: 6px;
+  cursor: pointer;
+  transition: all 120ms ease;
+  font-size: 12.5px;
+  color: var(--fg);
+}
+
+.fav-item-row:hover {
+  background: var(--glass-hover);
+}
+
+.fav-item-row.is-active {
+  background: var(--glass-active);
+  font-weight: 600;
+}
+
+.fav-item-main {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  flex: 1;
+}
+
+.fav-star-icon {
+  color: #f59e0b;
+  flex-shrink: 0;
+}
+
+.fav-actions {
+  display: none;
+  align-items: center;
+  gap: 2px;
+}
+
+.fav-item-row:hover .fav-actions {
+  display: inline-flex;
+}
+
+.fav-btn-mini {
+  background: transparent;
+  border: none;
+  color: var(--fg-dim);
+  cursor: pointer;
+  padding: 2px 4px;
+  border-radius: 3px;
+  font-size: 10px;
+}
+
+.fav-btn-mini:hover {
+  color: var(--fg);
+  background: rgba(255, 255, 255, 0.15);
+}
+
+/* 이름 바꾸기 & 복사/이동 모달 */
+.rename-modal-box,
+.copymove-modal-box {
+  width: 440px;
+  max-width: 90vw;
+}
+
+.rename-warning {
+  margin-top: 8px;
+  font-size: 12px;
+  color: #ef4444;
+  line-height: 1.4;
+}
+
+.recent-chips-box {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 6px;
+  margin-bottom: 12px;
+}
+
+.recent-chip-btn {
+  background: var(--glass-surface);
+  border: 1px solid var(--glass-border);
+  border-radius: 14px;
+  padding: 3px 10px;
+  font-size: 11.5px;
+  color: var(--fg);
+  cursor: pointer;
+  max-width: 190px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  transition: all 120ms ease;
+}
+
+.recent-chip-btn:hover {
+  background: var(--glass-hover);
+  border-color: rgba(255, 255, 255, 0.3);
+}
+
+.conflict-options {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-top: 8px;
+  padding: 8px 12px;
+  background: rgba(0, 0, 0, 0.15);
+  border-radius: 6px;
+  border: 1px solid var(--glass-border);
+}
+
+.conflict-radio-label {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 12.5px;
+  color: var(--fg);
+  cursor: pointer;
+}
+
+/* 외부 편집기 설정 */
+.external-editor-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 6px 10px;
+  background: rgba(0, 0, 0, 0.15);
+  border: 1px solid var(--glass-border);
+  border-radius: 6px;
+  margin-bottom: 6px;
+  font-size: 13px;
+}
+
+.external-editor-form {
+  display: flex;
+  gap: 8px;
+  margin-top: 8px;
+  align-items: center;
+}
+
+/* 바탕화면 배경 설정 & 우클릭 서브메뉴 */
+.wallpaper-options {
+  display: flex;
+  gap: 6px;
+  padding: 4px 10px 8px;
+}
+
+.context-menu-subitem {
+  flex: 1;
+  padding: 4px 8px !important;
+  font-size: 12px !important;
+  text-align: center;
+}
+
+.external-editors-sublist {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+/* ---------- 9단계: 인쇄 전용 스타일 (@media print) ---------- */
+@media print {
+  body,
+  html,
+  #root,
+  .app-container {
+    background: #ffffff !important;
+    color: #000000 !important;
+    width: 100% !important;
+    height: 100% !important;
+    margin: 0 !important;
+    padding: 0 !important;
+    overflow: visible !important;
+  }
+
+  /* 모든 UI 요소 숨김 (툴바, 상태바, 정보창, 탐색기 패널, 모달 등) */
+  nav,
+  header,
+  aside,
+  footer,
+  .top-toolbar-container,
+  .top-info-bar,
+  .filmstrip-container,
+  .viewer-status-bar,
+  .explorer-view,
+  .modal-overlay,
+  .toast-bubble,
+  .info-panel,
+  .context-menu,
+  .sort-dropdown-menu,
+  .slideshow-badge,
+  .image-info-badge {
+    display: none !important;
+  }
+
+  .viewer {
+    position: static !important;
+    width: 100% !important;
+    height: 100% !important;
+    background: transparent !important;
+    display: flex !important;
+    align-items: center !important;
+    justify-content: center !important;
+    padding: 0 !important;
+    margin: 0 !important;
+  }
+
+  .viewer-image {
+    position: static !important;
+    max-width: 100vw !important;
+    max-height: 100vh !important;
+    width: auto !important;
+    height: auto !important;
+    object-fit: contain !important;
+    transform: none !important;
+    page-break-inside: avoid !important;
+  }
+}
+
 

@@ -26,6 +26,22 @@ import {
   ArrowUp,
   RefreshCw,
   Eye,
+  FlipHorizontal,
+  FlipVertical,
+  SaveAll,
+  Scaling,
+  Printer,
+  Play,
+  Grid,
+  ArrowUpDown,
+  PenLine,
+  FolderInput,
+  FolderOutput,
+  FolderPlus,
+  Undo2,
+  Palette,
+  Monitor,
+  ClipboardPaste,
 } from "lucide-react";
 
 export type CommandId =
@@ -40,7 +56,12 @@ export type CommandId =
   | "zoomIn"
   | "rotateCcw"
   | "rotateCw"
+  | "flipH"
+  | "flipV"
   | "saveCopy"
+  | "saveAs"
+  | "resizeImage"
+  | "printImage"
   | "delete"
   | "copyImage"
   | "copyPath"
@@ -54,7 +75,20 @@ export type CommandId =
   | "openHelp"
   | "explorerUp"
   | "explorerRefresh"
-  | "openViewer";
+  | "openViewer"
+  | "toggleSlideshow"
+  | "toggleInterpolation"
+  | "sortMenu"
+  // 10단계 새 명령
+  | "rename"
+  | "copyToFolder"
+  | "moveToFolder"
+  | "newFolder"
+  | "undo"
+  | "openExternalEditor"
+  | "setWallpaper"
+  | "pasteClipboard"
+  | "copyFiles";
 
 export type ShortcutTrigger = {
   code: string; // KeyboardEvent.code 기준 (e.g. "KeyO", "ArrowRight")
@@ -112,6 +146,25 @@ export type CommandActions = {
   explorerUp?: () => void;
   explorerRefresh?: () => void;
   openViewerFromExplorer?: () => void;
+  // 9단계 새 기능 액션
+  flipH?: () => void;
+  flipV?: () => void;
+  saveAs?: () => void;
+  resizeImage?: () => void;
+  printImage?: () => void;
+  toggleSlideshow?: () => void;
+  toggleInterpolation?: () => void;
+  toggleSortMenu?: () => void;
+  // 10단계 새 기능 액션
+  rename?: () => void;
+  copyToFolder?: () => void;
+  moveToFolder?: () => void;
+  newFolder?: () => void;
+  undo?: () => void;
+  openExternalEditor?: () => void;
+  setWallpaper?: () => void;
+  pasteClipboard?: () => void;
+  copyFiles?: () => void;
 };
 
 export type CommandState = {
@@ -126,6 +179,13 @@ export type CommandState = {
   canSaveCopy: boolean;
   canGoUp?: boolean;
   hasSelectedItems?: boolean;
+  // 9단계 새 상태
+  isSlideshowActive?: boolean;
+  isPixelated?: boolean;
+  isFlippedH?: boolean;
+  isFlippedV?: boolean;
+  // 10단계 새 상태
+  canUndo?: boolean;
 };
 
 /**
@@ -445,26 +505,230 @@ export function buildCommands(actions: CommandActions, state: CommandState): App
       category: "탐색 및 이동",
       scope: "explorer",
     },
+
+    // 9단계 새 명령들
+    {
+      id: "flipH",
+      label: "좌우 반전",
+      icon: <FlipHorizontal size={iconSize} />,
+      shortcutDisplay: "M",
+      triggers: [{ code: "KeyM" }],
+      action: () => actions.flipH?.(),
+      isEnabled: state.appMode === "viewer" && state.hasImage,
+      isActive: Boolean(state.isFlippedH),
+      category: "보기 모드 및 편집",
+      scope: "viewer",
+    },
+    {
+      id: "flipV",
+      label: "상하 반전",
+      icon: <FlipVertical size={iconSize} />,
+      shortcutDisplay: "Shift+M",
+      triggers: [{ code: "KeyM", shift: true }],
+      action: () => actions.flipV?.(),
+      isEnabled: state.appMode === "viewer" && state.hasImage,
+      isActive: Boolean(state.isFlippedV),
+      category: "보기 모드 및 편집",
+      scope: "viewer",
+    },
+    {
+      id: "saveAs",
+      label: "다른 이름으로 저장",
+      icon: <SaveAll size={iconSize} />,
+      shortcutDisplay: "Ctrl+Shift+S",
+      triggers: [{ code: "KeyS", ctrl: true, shift: true }],
+      action: () => actions.saveAs?.(),
+      isEnabled: state.appMode === "viewer" && state.hasImage && !state.isArchive,
+      category: "보기 모드 및 편집",
+      scope: "viewer",
+    },
+    {
+      id: "resizeImage",
+      label: "크기 조정",
+      icon: <Scaling size={iconSize} />,
+      shortcutDisplay: "Ctrl+R",
+      triggers: [{ code: "KeyR", ctrl: true }],
+      action: () => actions.resizeImage?.(),
+      isEnabled: state.appMode === "viewer" && state.hasImage && !state.isArchive,
+      category: "보기 모드 및 편집",
+      scope: "viewer",
+    },
+    {
+      id: "printImage",
+      label: "인쇄",
+      icon: <Printer size={iconSize} />,
+      shortcutDisplay: "Ctrl+P",
+      triggers: [{ code: "KeyP", ctrl: true }],
+      action: () => actions.printImage?.(),
+      isEnabled: state.appMode === "viewer" && state.hasImage,
+      category: "파일 및 부가 기능",
+      scope: "viewer",
+    },
+    {
+      id: "toggleSlideshow",
+      label: "슬라이드쇼",
+      icon: <Play size={iconSize} />,
+      shortcutDisplay: "S",
+      triggers: [{ code: "KeyS" }],
+      action: () => actions.toggleSlideshow?.(),
+      isEnabled: state.appMode === "viewer" && state.hasItems,
+      isActive: Boolean(state.isSlideshowActive),
+      category: "보기 모드 및 편집",
+      scope: "viewer",
+    },
+    {
+      id: "toggleInterpolation",
+      label: "확대 보간 (부드럽게/픽셀)",
+      icon: <Grid size={iconSize} />,
+      shortcutDisplay: "",
+      triggers: [],
+      action: () => actions.toggleInterpolation?.(),
+      isEnabled: state.appMode === "viewer" && state.hasImage,
+      isActive: Boolean(state.isPixelated),
+      category: "화면 확대 및 뷰포트",
+      scope: "viewer",
+    },
+    {
+      id: "sortMenu",
+      label: "정렬",
+      icon: <ArrowUpDown size={iconSize} />,
+      shortcutDisplay: "",
+      triggers: [],
+      action: () => actions.toggleSortMenu?.(),
+      isEnabled: true,
+      category: "탐색 및 이동",
+      scope: "all",
+    },
+
+    // 10단계 새 명령들
+    {
+      id: "rename",
+      label: "이름 바꾸기",
+      icon: <PenLine size={iconSize} />,
+      shortcutDisplay: "F2",
+      triggers: [{ code: "F2" }],
+      action: () => actions.rename?.(),
+      isEnabled:
+        state.appMode === "viewer"
+          ? state.hasImage && !state.isArchive
+          : Boolean(state.hasSelectedItems),
+      category: "파일 및 부가 기능",
+      scope: "all",
+    },
+    {
+      id: "copyToFolder",
+      label: "폴더로 복사",
+      icon: <FolderInput size={iconSize} />,
+      shortcutDisplay: "F7",
+      triggers: [{ code: "F7" }],
+      action: () => actions.copyToFolder?.(),
+      isEnabled:
+        state.appMode === "viewer"
+          ? state.hasImage
+          : Boolean(state.hasSelectedItems),
+      category: "파일 및 부가 기능",
+      scope: "all",
+    },
+    {
+      id: "moveToFolder",
+      label: "폴더로 이동",
+      icon: <FolderOutput size={iconSize} />,
+      shortcutDisplay: "F8",
+      triggers: [{ code: "F8" }],
+      action: () => actions.moveToFolder?.(),
+      isEnabled:
+        state.appMode === "viewer"
+          ? state.hasImage && !state.isArchive
+          : Boolean(state.hasSelectedItems),
+      category: "파일 및 부가 기능",
+      scope: "all",
+    },
+    {
+      id: "newFolder",
+      label: "새 폴더",
+      icon: <FolderPlus size={iconSize} />,
+      shortcutDisplay: "Ctrl+Shift+N",
+      triggers: [{ code: "KeyN", ctrl: true, shift: true }],
+      action: () => actions.newFolder?.(),
+      isEnabled: state.appMode === "explorer",
+      category: "파일 및 부가 기능",
+      scope: "explorer",
+    },
+    {
+      id: "undo",
+      label: "실행 취소",
+      icon: <Undo2 size={iconSize} />,
+      shortcutDisplay: "Ctrl+Z",
+      triggers: [{ code: "KeyZ", ctrl: true }],
+      action: () => actions.undo?.(),
+      isEnabled: Boolean(state.canUndo ?? true),
+      category: "파일 및 부가 기능",
+      scope: "all",
+    },
+    {
+      id: "openExternalEditor",
+      label: "외부 편집기로 열기",
+      icon: <Palette size={iconSize} />,
+      shortcutDisplay: "Ctrl+E",
+      triggers: [{ code: "KeyE", ctrl: true }],
+      action: () => actions.openExternalEditor?.(),
+      isEnabled: state.hasImage && !state.isArchive,
+      category: "파일 및 부가 기능",
+      scope: "all",
+    },
+    {
+      id: "setWallpaper",
+      label: "바탕화면 배경으로 설정",
+      icon: <Monitor size={iconSize} />,
+      shortcutDisplay: "",
+      triggers: [],
+      action: () => actions.setWallpaper?.(),
+      isEnabled: state.hasImage,
+      category: "파일 및 부가 기능",
+      scope: "viewer",
+    },
+    {
+      id: "copyFiles",
+      label: "파일 복사",
+      icon: <Copy size={iconSize} />,
+      shortcutDisplay: "Ctrl+C",
+      triggers: [{ code: "KeyC", ctrl: true }],
+      action: () => actions.copyFiles?.(),
+      isEnabled: state.appMode === "explorer" && Boolean(state.hasSelectedItems),
+      category: "파일 및 부가 기능",
+      scope: "explorer",
+    },
+    {
+      id: "pasteClipboard",
+      label: state.appMode === "explorer" ? "붙여넣기" : "클립보드 이미지 열기",
+      icon: <ClipboardPaste size={iconSize} />,
+      shortcutDisplay: "Ctrl+V",
+      triggers: [{ code: "KeyV", ctrl: true }],
+      action: () => actions.pasteClipboard?.(),
+      isEnabled: true,
+      category: "파일 및 부가 기능",
+      scope: "all",
+    },
   ];
 }
 
 /** 뷰어 모드 상단 툴바 버튼 그룹 */
 export const TOOLBAR_GROUPS_VIEWER: CommandId[][] = [
-  ["open"],
+  ["open", "pasteClipboard"],
   ["prev", "next"],
-  ["fit", "actualSize", "zoomOut", "zoomIn"],
-  ["rotateCcw", "rotateCw"],
-  ["delete"],
-  ["toggleDoublePage", "toggleFilmstrip", "toggleInfo"],
+  ["fit", "actualSize", "zoomOut", "zoomIn", "toggleInterpolation"],
+  ["rotateCcw", "rotateCw", "flipH", "flipV"],
+  ["saveCopy", "saveAs", "resizeImage", "printImage", "rename", "delete", "undo"],
+  ["toggleSlideshow", "toggleDoublePage", "toggleFilmstrip", "toggleInfo", "sortMenu"],
   ["toggleFullscreen", "openSettings"],
 ];
 
 /** 탐색기 모드 상단 툴바 버튼 그룹 */
 export const TOOLBAR_GROUPS_EXPLORER: CommandId[][] = [
-  ["open"],
-  ["explorerUp", "explorerRefresh"],
+  ["open", "pasteClipboard"],
+  ["explorerUp", "explorerRefresh", "sortMenu"],
   ["openViewer"],
-  ["delete"],
+  ["newFolder", "rename", "copyToFolder", "moveToFolder", "delete", "undo"],
   ["toggleInfo"],
   ["toggleFullscreen", "openSettings"],
 ];
@@ -474,9 +738,12 @@ export const TOOLBAR_GROUPS = TOOLBAR_GROUPS_VIEWER;
 
 /** 우클릭 컨텍스트 메뉴 그룹 순서 */
 export const CONTEXT_MENU_GROUPS: CommandId[][] = [
-  ["open"],
-  ["copyImage", "copyPath", "showInFolder"],
-  ["rotateCcw", "rotateCw", "saveCopy"],
-  ["delete"],
+  ["open", "pasteClipboard"],
+  ["copyImage", "copyFiles", "copyPath", "showInFolder"],
+  ["rotateCcw", "rotateCw", "flipH", "flipV"],
+  ["saveCopy", "saveAs", "resizeImage", "printImage"],
+  ["rename", "copyToFolder", "moveToFolder", "delete", "undo"],
+  ["openExternalEditor", "setWallpaper"],
+  ["toggleSlideshow", "sortMenu"],
   ["toggleInfo", "openSettings"],
 ];

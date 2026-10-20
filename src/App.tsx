@@ -3,7 +3,8 @@ import { convertFileSrc, invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
 import { getCurrentWindow } from "@tauri-apps/api/window";
-import { open } from "@tauri-apps/plugin-dialog";
+import { open, save } from "@tauri-apps/plugin-dialog";
+import { startDrag } from "@crabnebula/tauri-plugin-drag";
 import {
   type AppCommand,
   type CommandId,
@@ -23,6 +24,10 @@ import {
   Image as ImageIcon,
   ArrowUp,
   RefreshCw,
+  Check,
+  Star,
+  Clock,
+  Filter,
 } from "lucide-react";
 import "./App.css";
 
@@ -39,10 +44,26 @@ const MIN_VISIBLE_PX = 60;
 // 필름스트립 썸네일 아이템 너비 (68px + gap 8px)
 const THUMB_ITEM_WIDTH = 76;
 
-export type SortBy = "name" | "dateModified" | "fileSize";
+export type SortBy = "name" | "dateModified" | "dateTaken" | "fileSize" | "fileType";
 export type SortOrder = "asc" | "desc";
 export type BgMode = "black" | "dark" | "checker";
 export type ReadingDirection = "ltr" | "rtl";
+export type ZoomMode = "fitIfLarge" | "fitAlways" | "originalAlways" | "fitWidth";
+export type WheelAction = "navigate" | "zoom";
+export type InterpolationMode = "smooth" | "pixelated";
+export type ExplorerFilter = "all" | "jpg" | "png" | "gif" | "webp" | "other";
+
+export type RecentItem = {
+  path: string;
+  name: string;
+  isFolder: boolean;
+};
+
+export type ExternalEditor = {
+  id: string;
+  name: string;
+  path: string;
+};
 
 export type AppSettings = {
   theme: "dark" | "light";
@@ -55,6 +76,19 @@ export type AppSettings = {
   lastFolder?: string | null;
   folderTreeWidth: number;
   thumbnailSize: number;
+  zoomMode: ZoomMode;
+  wheelAction: WheelAction;
+  keepTransform: boolean;
+  interpolation: InterpolationMode;
+  slideshowInterval: number;
+  slideshowRandom: boolean;
+  slideshowLoop: boolean;
+  // 10단계 새 설정
+  recentItems: RecentItem[];
+  favoriteFolders: string[];
+  recentTargetFolders: string[];
+  externalEditors: ExternalEditor[];
+  explorerFilter: ExplorerFilter;
 };
 
 export type SystemLocation = {
@@ -123,7 +157,15 @@ type ImageDetails = {
 
 type ViewState =
   | { kind: "empty" }
-  | { kind: "image"; src: string; fileName: string; path: string; isArchive?: boolean }
+  | {
+      kind: "image";
+      src: string;
+      fileName: string;
+      path: string;
+      isArchive?: boolean;
+      isClipboard?: boolean;
+      clipboardData?: string;
+    }
   | { kind: "error"; fileName: string; message: string; path?: string };
 
 type Transform = {
@@ -136,6 +178,27 @@ type ImageMeta = {
   naturalWidth: number;
   naturalHeight: number;
 };
+
+const FORBIDDEN_CHARS_REGEX = /[\\/:*?"<>|]/;
+const WINDOWS_RESERVED_NAMES = [
+  "CON", "PRN", "AUX", "NUL",
+  "COM1", "COM2", "COM3", "COM4", "COM5", "COM6", "COM7", "COM8", "COM9",
+  "LPT1", "LPT2", "LPT3", "LPT4", "LPT5", "LPT6", "LPT7", "LPT8", "LPT9"
+];
+
+function validateFileName(name: string): string | null {
+  const trimmed = name.trim();
+  if (!trimmed) return "파일 이름을 입력해주세요.";
+  if (FORBIDDEN_CHARS_REGEX.test(trimmed)) {
+    return '파일 이름에 다음 문자를 포함할 수 없습니다: \\ / : * ? " < > |';
+  }
+  const dotIdx = trimmed.indexOf(".");
+  const stem = (dotIdx === -1 ? trimmed : trimmed.slice(0, dotIdx)).toUpperCase();
+  if (WINDOWS_RESERVED_NAMES.includes(stem)) {
+    return `"${stem}"은(는) 윈도우 예약어이므로 사용할 수 없습니다.`;
+  }
+  return null;
+}
 
 /** 윈도우 경로(\, /, UNC 포함)에서 파일명만 꺼낸다 */
 function baseName(path: string): string {
@@ -274,9 +337,10 @@ function App() {
   const [gridDimensions, setGridDimensions] = useState<{ width: number; height: number }>({ width: 800, height: 600 });
   const [isResizingTree, setIsResizingTree] = useState<boolean>(false);
 
-  // 6단계 & 7단계: 설정 및 도움말 모달 상태
+  // 6단계 & 7단계 & 9단계: 설정 및 도움말 모달 상태
   const [showSettingsModal, setShowSettingsModal] = useState(false);
   const [showHelpModal, setShowHelpModal] = useState(false);
+  const [settingsTab, setSettingsTab] = useState<"general" | "view">("general");
   const [settings, setSettings] = useState<AppSettings>({
     theme: "dark",
     sortBy: "name",
@@ -288,7 +352,75 @@ function App() {
     lastFolder: null,
     folderTreeWidth: 240,
     thumbnailSize: 120,
+    zoomMode: "fitIfLarge",
+    wheelAction: "navigate",
+    keepTransform: false,
+    interpolation: "smooth",
+    slideshowInterval: 3,
+    slideshowRandom: false,
+    slideshowLoop: true,
+    recentItems: [],
+    favoriteFolders: [],
+    recentTargetFolders: [],
+    externalEditors: [],
+    explorerFilter: "all",
   });
+
+  // 10단계: 이름 바꾸기(F2) 모달 상태
+  const [showRenameModal, setShowRenameModal] = useState(false);
+  const [renameTargetItem, setRenameTargetItem] = useState<{ path: string; oldName: string; isDir?: boolean } | null>(null);
+  const [renameNewName, setRenameNewName] = useState("");
+  const [renameError, setRenameError] = useState<string | null>(null);
+  const renameInputRef = useRef<HTMLInputElement>(null);
+
+  // 10단계: 폴더로 복사(F7) / 이동(F8) 모달 상태
+  const [showCopyMoveModal, setShowCopyMoveModal] = useState(false);
+  const [copyMoveMode, setCopyMoveMode] = useState<"copy" | "move">("copy");
+  const [copyMoveSourcePaths, setCopyMoveSourcePaths] = useState<string[]>([]);
+  const [copyMoveTargetFolder, setCopyMoveTargetFolder] = useState<string>("");
+  const [copyMoveConflict, setCopyMoveConflict] = useState<"rename" | "overwrite" | "skip">("rename");
+
+  // 10단계: 최근 항목 드롭다운 상태
+  const [showRecentDropdown, setShowRecentDropdown] = useState(false);
+
+  // 10단계: 외부 편집기 등록 폼 상태 (설정 창 내부)
+  const [newEditorName, setNewEditorName] = useState("");
+  const [newEditorPath, setNewEditorPath] = useState("");
+
+  // 10단계: 실행 취소(Ctrl+Z), 최근 항목 존재 여부 맵, 즐겨찾기 드래그 순서 변경
+  const [undoCount, setUndoCount] = useState(0);
+  const [itemExistsMap, setItemExistsMap] = useState<Record<string, boolean>>({});
+  const [draggedFavIdx, setDraggedFavIdx] = useState<number | null>(null);
+
+  // 9단계: 좌우 반전 / 상하 반전 상태
+  const [flipH, setFlipH] = useState(false);
+  const [flipV, setFlipV] = useState(false);
+
+  // 9단계: 다른 이름으로 저장 모달 상태
+  const [showSaveAsModal, setShowSaveAsModal] = useState(false);
+  const [saveAsTargetPath, setSaveAsTargetPath] = useState("");
+  const [saveAsFormat, setSaveAsFormat] = useState<"jpg" | "png" | "webp" | "bmp">("jpg");
+  const [saveAsQuality, setSaveAsQuality] = useState(90);
+  const [saveAsStripMetadata, setSaveAsStripMetadata] = useState(false);
+  const [saveAsStripAiPrompt, setSaveAsStripAiPrompt] = useState(false);
+  const [saveAsResizeW, setSaveAsResizeW] = useState<number | undefined>(undefined);
+  const [saveAsResizeH, setSaveAsResizeH] = useState<number | undefined>(undefined);
+
+  // 9단계: 크기 조정 모달 상태
+  const [showResizeModal, setShowResizeModal] = useState(false);
+  const [resizeUnit, setResizeUnit] = useState<"pixel" | "percent">("pixel");
+  const [resizeKeepRatio, setResizeKeepRatio] = useState(true);
+  const [resizeCustomW, setResizeCustomW] = useState(0);
+  const [resizeCustomH, setResizeCustomH] = useState(0);
+
+  // 9단계: 정렬 메뉴 드롭다운 상태
+  const [showSortDropdown, setShowSortDropdown] = useState(false);
+
+  // 9단계: 슬라이드쇼 상태
+  const [isSlideshowActive, setIsSlideshowActive] = useState(false);
+  const [isSlideshowPaused, setIsSlideshowPaused] = useState(false);
+  const [slideshowRemainingSec, setSlideshowRemainingSec] = useState(3);
+  const [showSlideshowBadge, setShowSlideshowBadge] = useState(false);
 
   // 7단계: 전체화면 여부, 상단 마우스 감지(전체화면 툴바 노출), 우클릭 컨텍스트 메뉴
   const [isFullscreen, setIsFullscreen] = useState(false);
@@ -399,6 +531,63 @@ function App() {
 
       const x = vw / 2 - (hw * cos - hh * sin);
       const y = vh / 2 - (hw * sin + hh * cos);
+      return { x, y, scale };
+    },
+    []
+  );
+
+  // 9단계: 보기 설정(zoomMode)에 따른 초기 변환 계산
+  const getInitialTransform = useCallback(
+    (
+      vw: number,
+      vh: number,
+      nw: number,
+      nh: number,
+      rot = 0,
+      mode: ZoomMode = settingsRef.current.zoomMode
+    ): Transform => {
+      const dpr = window.devicePixelRatio || 1;
+      const bw = nw / dpr;
+      const bh = nh / dpr;
+      const isSideways = rot === 90 || rot === 270;
+      const effW = isSideways ? bh : bw;
+      const effH = isSideways ? bw : bh;
+      const fitScale = Math.min(vw / effW, vh / effH);
+
+      let scale: number;
+      if (mode === "fitIfLarge") {
+        // ① 큰 이미지만 화면에 맞춤, 작은 이미지는 원본 크기(기본값)
+        scale = effW <= vw && effH <= vh ? 1.0 : fitScale;
+      } else if (mode === "fitAlways") {
+        // ② 항상 화면에 맞춤
+        scale = fitScale;
+      } else if (mode === "originalAlways") {
+        // ③ 항상 원본 크기
+        scale = 1.0;
+      } else if (mode === "fitWidth") {
+        // ④ 너비에 맞춤(긴 세로 이미지·웹툰용, 위아래 스크롤)
+        scale = vw / effW;
+      } else {
+        scale = fitScale;
+      }
+
+      scale = Math.max(MIN_SCALE, Math.min(MAX_SCALE, scale));
+
+      const hw = (bw * scale) / 2;
+      const hh = (bh * scale) / 2;
+      const rad = (rot * Math.PI) / 180;
+      const cos = Math.round(Math.cos(rad));
+      const sin = Math.round(Math.sin(rad));
+
+      let x = vw / 2 - (hw * cos - hh * sin);
+      let y = vh / 2 - (hw * sin + hh * cos);
+
+      if (mode === "fitWidth" && rot === 0) {
+        // 너비 맞춤일 때 세로 스크롤을 위해 맨 위에서 시작
+        x = 0;
+        y = 0;
+      }
+
       return { x, y, scale };
     },
     []
@@ -626,6 +815,20 @@ function App() {
     return item.path;
   }, []);
 
+  // 10단계: 최근 열어본 파일·폴더 등록 (최대 10개)
+  const addRecentItem = useCallback((itemPath: string, isFolder: boolean) => {
+    if (!itemPath) return;
+    setSettings((prev) => {
+      const name = baseName(itemPath);
+      const existing = prev.recentItems || [];
+      const filtered = existing.filter((item) => item.path.toLowerCase() !== itemPath.toLowerCase());
+      const updated = [{ path: itemPath, name, isFolder }, ...filtered].slice(0, 10);
+      const newSettings = { ...prev, recentItems: updated };
+      invoke("save_settings", { settings: newSettings }).catch(console.error);
+      return newSettings;
+    });
+  }, []);
+
   // 파일 열기
   const openPath = useCallback(
     (
@@ -651,8 +854,13 @@ function App() {
           setSecondLoaded(false);
           setMeta(null);
           setSecondMeta(null);
-          setIsFit(true);
-          setRotation(0);
+
+          if (!settingsRef.current.keepTransform) {
+            setIsFit(true);
+            setRotation(0);
+            setFlipH(false);
+            setFlipV(false);
+          }
 
           const currentItem = res.items[res.currentIndex] ?? {
             path,
@@ -669,6 +877,7 @@ function App() {
           setWindowTitle(currentItem.fileName, res.currentIndex, res.items.length);
           pingTopBar();
           loadDetails(currentItem.path);
+          addRecentItem(currentItem.path, false);
         })
         .catch((err) => {
           if (id !== requestId.current) return;
@@ -683,7 +892,11 @@ function App() {
   const openPathRef = useRef(openPath);
   openPathRef.current = openPath;
 
-  // 6단계: 설정 업데이트 헬퍼
+  const navigateToExplorerFolderRef = useRef<
+    (folderPath: string, selectItemPath?: string) => Promise<void>
+  >(() => Promise.resolve());
+
+  // 6단계 & 9단계: 설정 업데이트 헬퍼 (탐색기와 뷰어가 같은 정렬 공유, 휠/확대/보간 즉시 반영)
   const updateSettings = useCallback((partial: Partial<AppSettings>) => {
     setSettings((prev) => {
       const next = { ...prev, ...partial };
@@ -694,6 +907,22 @@ function App() {
       if (partial.defaultBg) {
         setBgMode(partial.defaultBg);
       }
+      if (partial.zoomMode) {
+        const el = viewerRef.current;
+        const m = metaRef.current;
+        if (el && m) {
+          const t = getInitialTransform(
+            el.clientWidth,
+            el.clientHeight,
+            m.naturalWidth,
+            m.naturalHeight,
+            rotationRef.current,
+            partial.zoomMode
+          );
+          setTransform(t);
+          setIsFit(partial.zoomMode === "fitIfLarge" || partial.zoomMode === "fitAlways");
+        }
+      }
       invoke("save_settings", { settings: next }).catch((err) => {
         console.error("설정 저장 실패:", err);
       });
@@ -701,14 +930,19 @@ function App() {
         (partial.sortBy && partial.sortBy !== prev.sortBy) ||
         (partial.sortOrder && partial.sortOrder !== prev.sortOrder)
       ) {
+        // 뷰어 모드 재정렬
         const curPath = itemsRef.current[currentIndexRef.current]?.path;
         if (curPath) {
           openPathRef.current(curPath, next.sortBy, next.sortOrder);
         }
+        // 탐색기 모드 재정렬
+        if (currentExplorerPath) {
+          void navigateToExplorerFolderRef.current(currentExplorerPath);
+        }
       }
       return next;
     });
-  }, []);
+  }, [getInitialTransform, currentExplorerPath]);
 
   // 인덱스 이동
   const navigateToIndex = useCallback(
@@ -765,8 +999,14 @@ function App() {
       setSecondLoaded(false);
       setMeta(null);
       setSecondMeta(null);
-      setIsFit(true);
-      setRotation(0); // 새 사진 열면 회전 초기화
+
+      // 9단계: keepTransform 옵션 확인 (false면 회전 및 반전 초기화)
+      if (!settingsRef.current.keepTransform) {
+        setIsFit(true);
+        setRotation(0);
+        setFlipH(false);
+        setFlipV(false);
+      }
 
       // ZIP 아카이브 내부 파일인 경우 온디맨드 추출 확인
       const actualPath = await ensureArchiveEntryPath(item);
@@ -899,26 +1139,65 @@ function App() {
     }
   }, [showFilmstrip, items, filmstripScrollLeft, filmstripWidth, thumbnails]);
 
+  // 10단계: 클립보드 이미지 파일로 저장 (Ctrl+S / Ctrl+Shift+S)
+  const handleSaveClipboardImage = useCallback(async () => {
+    if (view.kind !== "image" || !view.clipboardData) return;
+    try {
+      const targetPath = await save({
+        defaultPath: "클립보드 이미지.png",
+        filters: [
+          { name: "PNG 이미지", extensions: ["png"] },
+          { name: "JPEG 이미지", extensions: ["jpg"] },
+          { name: "WebP 이미지", extensions: ["webp"] },
+        ],
+      });
+      if (!targetPath) return;
+      await invoke("save_clipboard_image", {
+        base64Data: view.clipboardData,
+        targetPath,
+      });
+      showToast(`파일이 저장되었습니다: ${baseName(targetPath)}`);
+      addRecentItem(targetPath, false);
+      setView((v) => ({
+        ...v,
+        path: targetPath,
+        fileName: baseName(targetPath),
+        src: convertFileSrc(targetPath),
+        isClipboard: false,
+        clipboardData: undefined,
+      }));
+      setWindowTitle(baseName(targetPath));
+    } catch (e: any) {
+      showToast(`저장 실패: ${String(e)}`);
+    }
+  }, [view, addRecentItem, showToast]);
+
   // 5단계: 현재 이미지 회전 사본 저장 (Ctrl+S)
   const saveRotatedCopy = useCallback(async () => {
+    if (view.kind === "image" && view.isClipboard) {
+      void handleSaveClipboardImage();
+      return;
+    }
     if (view.kind !== "image" || !view.path || view.isArchive) {
       showToast("압축 파일 내 이미지는 사본 저장을 지원하지 않습니다.");
       return;
     }
-    if (rotation === 0) {
-      showToast("회전되지 않은 원본 상태입니다.");
+    if (rotation === 0 && !flipH && !flipV) {
+      showToast("회전 또는 반전되지 않은 원본 상태입니다.");
       return;
     }
     try {
       const savedPath = await invoke<string>("save_rotated_image", {
         sourcePath: view.path,
         rotation,
+        flipH,
+        flipV,
       });
       showToast(`사본 저장 완료: ${baseName(savedPath)}`);
     } catch (err) {
       showToast(`사본 저장 실패: ${String(err)}`);
     }
-  }, [view, rotation, showToast]);
+  }, [view, rotation, flipH, flipV, showToast]);
 
   // 8단계: 탐색기 폴더 이동
   const navigateToExplorerFolder = useCallback(
@@ -937,6 +1216,7 @@ function App() {
 
         // 마지막 방문 폴더 저장
         updateSettings({ lastFolder: res.currentPath });
+        addRecentItem(res.currentPath, true);
 
         // 실시간 폴더 감시 등록 (notify)
         await invoke("watch_folder", { folderPath: res.currentPath }).catch((err) => {
@@ -974,6 +1254,8 @@ function App() {
     },
     [thumbnailSize, updateSettings, showToast]
   );
+
+  navigateToExplorerFolderRef.current = navigateToExplorerFolder;
 
   // 상위 폴더로 이동
   const goToParentFolder = useCallback(() => {
@@ -1014,10 +1296,29 @@ function App() {
     [subfoldersMap]
   );
 
+  // 10단계: 파일 형식 필터에 따른 탐색기 아이템 필터링
+  const filteredExplorerItems = useMemo(() => {
+    if (!explorerResult?.items) return [];
+    const filter = settings.explorerFilter || "all";
+    if (filter === "all") return explorerResult.items;
+    return explorerResult.items.filter((item) => {
+      if (item.kind === "folder") return true; // 폴더는 항상 표시
+      const ext = item.extension.toLowerCase();
+      if (filter === "jpg") return ext === "jpg" || ext === "jpeg" || ext === "jfif";
+      if (filter === "png") return ext === "png";
+      if (filter === "gif") return ext === "gif";
+      if (filter === "webp") return ext === "webp";
+      if (filter === "other") {
+        return !["jpg", "jpeg", "jfif", "png", "gif", "webp"].includes(ext);
+      }
+      return true;
+    });
+  }, [explorerResult?.items, settings.explorerFilter]);
+
   // 탐색기에서 선택된 항목을 뷰어로 열기
   const openSelectedInViewer = useCallback(() => {
     if (!explorerResult) return;
-    const firstSelected = explorerResult.items.find((it) => selectedPaths.has(it.path));
+    const firstSelected = filteredExplorerItems.find((it) => selectedPaths.has(it.path));
     if (!firstSelected) return;
 
     if (firstSelected.kind === "image") {
@@ -1026,7 +1327,7 @@ function App() {
     } else {
       navigateToExplorerFolder(firstSelected.path);
     }
-  }, [explorerResult, selectedPaths, openPath, navigateToExplorerFolder]);
+  }, [explorerResult, filteredExplorerItems, selectedPaths, openPath, navigateToExplorerFolder]);
 
   // 뷰어에서 탐색기로 복귀
   const returnToExplorer = useCallback(() => {
@@ -1040,7 +1341,7 @@ function App() {
         explorerResult
       ) {
         setSelectedPaths(new Set([currentViewerPath]));
-        const idx = explorerResult.items.findIndex(
+        const idx = filteredExplorerItems.findIndex(
           (it) => it.path.toLowerCase() === currentViewerPath.toLowerCase()
         );
         if (idx !== -1) {
@@ -1061,7 +1362,7 @@ function App() {
         navigateToExplorerFolder(parentDir, currentViewerPath);
       }
     }
-  }, [view, currentExplorerPath, explorerResult, thumbnailSize, navigateToExplorerFolder]);
+  }, [view, currentExplorerPath, explorerResult, filteredExplorerItems, thumbnailSize, navigateToExplorerFolder]);
 
   // 탐색기 그리드 항목 클릭
   const handleExplorerItemClick = useCallback(
@@ -1080,7 +1381,7 @@ function App() {
       } else if (e.shiftKey && lastClickedIndex !== -1 && explorerResult) {
         const start = Math.min(lastClickedIndex, index);
         const end = Math.max(lastClickedIndex, index);
-        const rangePaths = explorerResult.items.slice(start, end + 1).map((i) => i.path);
+        const rangePaths = filteredExplorerItems.slice(start, end + 1).map((i) => i.path);
         setSelectedPaths(new Set(rangePaths));
       } else {
         setSelectedPaths(new Set([item.path]));
@@ -1091,7 +1392,7 @@ function App() {
         loadDetails(item.path);
       }
     },
-    [lastClickedIndex, explorerResult, loadDetails]
+    [lastClickedIndex, explorerResult, filteredExplorerItems, loadDetails]
   );
 
   // 탐색기 그리드 더블클릭
@@ -1110,12 +1411,12 @@ function App() {
   // 탐색기 방향키 이동
   const handleGridKeyNavigation = useCallback(
     (code: string) => {
-      if (!explorerResult || explorerResult.items.length === 0) return;
+      if (filteredExplorerItems.length === 0) return;
       const el = gridContainerRef.current;
       const itemWidth = thumbnailSize + 16;
       const itemHeight = thumbnailSize + 52;
       const cols = el ? Math.max(1, Math.floor(el.clientWidth / itemWidth)) : 4;
-      const total = explorerResult.items.length;
+      const total = filteredExplorerItems.length;
 
       let nextIdx = focusedIndex;
       if (nextIdx === -1) nextIdx = 0;
@@ -1128,7 +1429,7 @@ function App() {
 
       setFocusedIndex(nextIdx);
       setLastClickedIndex(nextIdx);
-      const targetItem = explorerResult.items[nextIdx];
+      const targetItem = filteredExplorerItems[nextIdx];
       if (targetItem) {
         setSelectedPaths(new Set([targetItem.path]));
         if (targetItem.kind === "image") {
@@ -1146,7 +1447,7 @@ function App() {
         }
       }
     },
-    [explorerResult, focusedIndex, thumbnailSize, loadDetails]
+    [filteredExplorerItems, focusedIndex, thumbnailSize, loadDetails]
   );
 
   // 5단계 & 8단계: 휴지통으로 삭제 실행 (단일/다중 대응)
@@ -1160,6 +1461,7 @@ function App() {
       const targetPath = view.path;
       try {
         await invoke("delete_to_trash", { path: targetPath });
+        setUndoCount((c) => Math.min(20, c + 1));
         showToast("휴지통으로 이동했습니다.");
 
         // 목록에서 제거 후 다음 파일로 이동
@@ -1183,6 +1485,7 @@ function App() {
       const pathsToDelete = Array.from(selectedPaths);
       try {
         await invoke("delete_paths_to_trash", { paths: pathsToDelete });
+        setUndoCount((c) => Math.min(20, c + 1));
         showToast(`${pathsToDelete.length}개 항목을 휴지통으로 이동했습니다.`);
         setSelectedPaths(new Set());
         refreshExplorer();
@@ -1219,6 +1522,9 @@ function App() {
       if (!ctx) throw new Error("캔버스를 생성할 수 없습니다.");
 
       ctx.translate(canvas.width / 2, canvas.height / 2);
+      if (flipH || flipV) {
+        ctx.scale(flipH ? -1 : 1, flipV ? -1 : 1);
+      }
       ctx.rotate((rotation * Math.PI) / 180);
       ctx.drawImage(img, -img.naturalWidth / 2, -img.naturalHeight / 2);
 
@@ -1233,7 +1539,7 @@ function App() {
     } catch (err) {
       showToast(`이미지 복사 실패: ${String(err)}`);
     }
-  }, [view, rotation, showToast]);
+  }, [view, rotation, flipH, flipV, showToast]);
 
   // 5단계: 파일 경로 텍스트 복사 (Ctrl+Shift+C)
   const copyPathToClipboard = useCallback(() => {
@@ -1290,7 +1596,650 @@ function App() {
     }
   }, [view, imageDetails, showToast]);
 
-  // 7단계 & 8단계 (구조 정리): 모든 명령을 단일 목록(Command Registry)에 정의
+  // 9단계: 다른 이름으로 저장 (Ctrl+Shift+S)
+  const openSaveAsModal = useCallback((prefillW?: number, prefillH?: number) => {
+    if (view.kind === "image" && view.isClipboard) {
+      void handleSaveClipboardImage();
+      return;
+    }
+    if (view.kind !== "image" || !view.path || view.isArchive) {
+      showToast("저장할 수 있는 이미지가 아닙니다.");
+      return;
+    }
+    const dotIdx = view.path.lastIndexOf(".");
+    const baseWithoutExt = dotIdx !== -1 ? view.path.slice(0, dotIdx) : view.path;
+    const ext = dotIdx !== -1 ? view.path.slice(dotIdx + 1).toLowerCase() : "jpg";
+    const initFmt = ["png", "webp", "bmp"].includes(ext) ? (ext as "png" | "webp" | "bmp") : "jpg";
+
+    setSaveAsFormat(initFmt);
+    setSaveAsTargetPath(`${baseWithoutExt}_copy.${initFmt}`);
+    setSaveAsQuality(90);
+    setSaveAsStripMetadata(false);
+    setSaveAsStripAiPrompt(false);
+    setSaveAsResizeW(prefillW);
+    setSaveAsResizeH(prefillH);
+    setShowSaveAsModal(true);
+  }, [view, showToast]);
+
+  const handleBrowseSaveTarget = useCallback(async () => {
+    try {
+      const selected = await save({
+        title: "다른 이름으로 저장",
+        defaultPath: saveAsTargetPath,
+        filters: [
+          { name: `${saveAsFormat.toUpperCase()} 이미지`, extensions: [saveAsFormat] },
+          { name: "모든 파일", extensions: ["*"] },
+        ],
+      });
+      if (selected) {
+        setSaveAsTargetPath(selected);
+      }
+    } catch (err) {
+      console.error("저장 경로 선택 실패:", err);
+    }
+  }, [saveAsTargetPath, saveAsFormat]);
+
+  const executeSaveAs = useCallback(async () => {
+    if (view.kind !== "image" || !view.path || !saveAsTargetPath) return;
+    try {
+      const saved = await invoke<string>("save_image_advanced", {
+        sourcePath: view.path,
+        targetPath: saveAsTargetPath,
+        format: saveAsFormat,
+        quality: saveAsQuality,
+        rotation,
+        flipH,
+        flipV,
+        stripMetadata: saveAsStripMetadata,
+        stripAiPrompt: saveAsStripAiPrompt,
+        resizeWidth: saveAsResizeW && saveAsResizeW > 0 ? saveAsResizeW : null,
+        resizeHeight: saveAsResizeH && saveAsResizeH > 0 ? saveAsResizeH : null,
+      });
+      showToast(`저장 완료: ${baseName(saved)}`);
+      setShowSaveAsModal(false);
+    } catch (err) {
+      showToast(`저장 실패: ${String(err)}`);
+    }
+  }, [
+    view,
+    saveAsTargetPath,
+    saveAsFormat,
+    saveAsQuality,
+    rotation,
+    flipH,
+    flipV,
+    saveAsStripMetadata,
+    saveAsStripAiPrompt,
+    saveAsResizeW,
+    saveAsResizeH,
+    showToast,
+  ]);
+
+  // 9단계: 크기 조정 (Ctrl+R)
+  const openResizeModal = useCallback(() => {
+    if (view.kind !== "image" || !meta) {
+      showToast("크기를 조정할 이미지가 없습니다.");
+      return;
+    }
+    setResizeCustomW(meta.naturalWidth);
+    setResizeCustomH(meta.naturalHeight);
+    setResizeUnit("pixel");
+    setResizeKeepRatio(true);
+    setShowResizeModal(true);
+  }, [view.kind, meta, showToast]);
+
+  // 9단계: 인쇄 (Ctrl+P)
+  const handlePrint = useCallback(() => {
+    if (view.kind !== "image") return;
+    window.print();
+  }, [view.kind]);
+
+  // 9단계: 슬라이드쇼 (KeyS)
+  const toggleSlideshow = useCallback(async () => {
+    if (isSlideshowActive) {
+      setIsSlideshowActive(false);
+      setIsSlideshowPaused(false);
+    } else {
+      if (itemsRef.current.length === 0) return;
+      setIsSlideshowActive(true);
+      setIsSlideshowPaused(false);
+      setSlideshowRemainingSec(settingsRef.current.slideshowInterval || 3);
+      setShowSlideshowBadge(true);
+      try {
+        const win = getCurrentWindow();
+        if (!(await win.isFullscreen())) {
+          await win.setFullscreen(true);
+          setIsFullscreen(true);
+        }
+      } catch {
+        // fallback
+      }
+    }
+  }, [isSlideshowActive]);
+
+  const stopSlideshow = useCallback(() => {
+    setIsSlideshowActive(false);
+    setIsSlideshowPaused(false);
+  }, []);
+
+  // 슬라이드쇼 타이머
+  useEffect(() => {
+    if (!isSlideshowActive) return;
+    const badgeTimer = window.setTimeout(() => {
+      setShowSlideshowBadge(false);
+    }, 2000);
+    return () => window.clearTimeout(badgeTimer);
+  }, [isSlideshowActive, currentIndex, isSlideshowPaused]);
+
+  useEffect(() => {
+    if (!isSlideshowActive || isSlideshowPaused) return;
+    const timer = window.setInterval(() => {
+      setSlideshowRemainingSec((prev) => {
+        if (prev <= 1) {
+          const curItems = itemsRef.current;
+          const curIdx = currentIndexRef.current;
+          const isRandom = settingsRef.current.slideshowRandom;
+          const isLoop = settingsRef.current.slideshowLoop;
+
+          if (isRandom && curItems.length > 1) {
+            let nextRand = curIdx;
+            while (nextRand === curIdx) {
+              nextRand = Math.floor(Math.random() * curItems.length);
+            }
+            navigateToIndex(nextRand);
+          } else {
+            const nextIdx = curIdx + 1;
+            if (nextIdx >= curItems.length) {
+              if (isLoop) {
+                navigateToIndex(0);
+              } else {
+                setIsSlideshowActive(false);
+                showToast("슬라이드쇼가 종료되었습니다.");
+                return 0;
+              }
+            } else {
+              navigateToIndex(nextIdx);
+            }
+          }
+          return settingsRef.current.slideshowInterval || 3;
+        }
+        return prev - 1;
+      });
+    }, 1000);
+    return () => window.clearInterval(timer);
+  }, [isSlideshowActive, isSlideshowPaused, navigateToIndex, showToast]);
+
+  // 10단계: 이름 바꾸기(F2)
+  const openRenameModal = useCallback(
+    (target?: { path: string; oldName: string; isDir?: boolean }) => {
+      let targetItem = target;
+      if (!targetItem) {
+        if (appMode === "viewer") {
+          if (view.kind === "image" && view.path && !view.isArchive) {
+            targetItem = {
+              path: view.path,
+              oldName: view.fileName || baseName(view.path),
+              isDir: false,
+            };
+          }
+        } else {
+          if (selectedPaths.size > 0 && explorerResult) {
+            const firstSelectedPath = Array.from(selectedPaths)[0];
+            const it = filteredExplorerItems.find((item) => item.path === firstSelectedPath);
+            if (it) {
+              targetItem = { path: it.path, oldName: it.name, isDir: it.kind === "folder" };
+            }
+          }
+        }
+      }
+      if (!targetItem) {
+        showToast("이름을 변경할 대상을 선택해주세요.");
+        return;
+      }
+      setRenameTargetItem(targetItem);
+      setRenameNewName(targetItem.oldName);
+      setRenameError(null);
+      setShowRenameModal(true);
+      setTimeout(() => {
+        if (renameInputRef.current) {
+          renameInputRef.current.focus();
+          if (!targetItem?.isDir) {
+            const lastDot = targetItem.oldName.lastIndexOf(".");
+            if (lastDot > 0) {
+              renameInputRef.current.setSelectionRange(0, lastDot);
+              return;
+            }
+          }
+          renameInputRef.current.select();
+        }
+      }, 50);
+    },
+    [appMode, view, selectedPaths, explorerResult, filteredExplorerItems, showToast]
+  );
+
+  const executeRename = useCallback(async () => {
+    if (!renameTargetItem) return;
+    const trimmed = renameNewName.trim();
+    const err = validateFileName(trimmed);
+    if (err) {
+      setRenameError(err);
+      return;
+    }
+    if (trimmed === renameTargetItem.oldName) {
+      setShowRenameModal(false);
+      return;
+    }
+    try {
+      const newPath = await invoke<string>("rename_file", {
+        oldPath: renameTargetItem.path,
+        newName: trimmed,
+      });
+      setUndoCount((c) => Math.min(20, c + 1));
+      setShowRenameModal(false);
+      showToast(`이름 변경 완료: ${trimmed}`);
+
+      addRecentItem(newPath, Boolean(renameTargetItem.isDir));
+
+      if (appMode === "viewer" && view.kind === "image" && view.path === renameTargetItem.path) {
+        setView((v) => ({
+          ...v,
+          path: newPath,
+          fileName: baseName(newPath),
+          src: convertFileSrc(newPath),
+        }));
+        setItems((prev) =>
+          prev.map((it) =>
+            it.path === renameTargetItem.path
+              ? { ...it, path: newPath, fileName: baseName(newPath) }
+              : it
+          )
+        );
+        setWindowTitle(baseName(newPath), currentIndex, items.length);
+      }
+
+      if (appMode === "explorer") {
+        await refreshExplorer();
+        setSelectedPaths(new Set([newPath]));
+      }
+    } catch (e: any) {
+      setRenameError(String(e));
+    }
+  }, [
+    renameTargetItem,
+    renameNewName,
+    addRecentItem,
+    appMode,
+    view,
+    currentIndex,
+    items.length,
+    refreshExplorer,
+    showToast,
+  ]);
+
+  // 10단계: 폴더로 복사(F7) / 폴더로 이동(F8)
+  const openCopyMoveModal = useCallback(
+    (mode: "copy" | "move") => {
+      let paths: string[] = [];
+      if (appMode === "viewer") {
+        if (view.kind === "image" && view.path) {
+          if (mode === "move" && view.isArchive) {
+            showToast("압축 파일 내부 이미지는 이동할 수 없습니다.");
+            return;
+          }
+          paths = [view.path];
+        }
+      } else {
+        paths = Array.from(selectedPaths);
+      }
+      if (paths.length === 0) {
+        showToast(mode === "copy" ? "복사할 항목을 선택해주세요." : "이동할 항목을 선택해주세요.");
+        return;
+      }
+      setCopyMoveMode(mode);
+      setCopyMoveSourcePaths(paths);
+      setCopyMoveTargetFolder(settings.recentTargetFolders?.[0] || "");
+      setCopyMoveConflict("rename");
+      setShowCopyMoveModal(true);
+    },
+    [appMode, view, selectedPaths, settings.recentTargetFolders, showToast]
+  );
+
+  const handleBrowseCopyMoveTarget = useCallback(async () => {
+    const selected = await open({ directory: true, multiple: false });
+    if (selected && typeof selected === "string") {
+      setCopyMoveTargetFolder(selected);
+    }
+  }, []);
+
+  const executeCopyMove = useCallback(async () => {
+    const target = copyMoveTargetFolder.trim();
+    if (!target) {
+      showToast("대상 폴더를 지정해주세요.");
+      return;
+    }
+    try {
+      const cmdName =
+        copyMoveMode === "copy" ? "copy_files_to_folder" : "move_files_to_folder";
+      const res = await invoke<string[]>(cmdName, {
+        sourcePaths: copyMoveSourcePaths,
+        targetFolder: target,
+        conflictMode: copyMoveConflict,
+      });
+
+      const updatedTargets = [
+        target,
+        ...(settings.recentTargetFolders || []).filter((f) => f !== target),
+      ].slice(0, 5);
+      updateSettings({ recentTargetFolders: updatedTargets });
+
+      if (copyMoveMode === "move") {
+        setUndoCount((c) => Math.min(20, c + 1));
+        showToast(`${res.length}개 항목 이동 완료`);
+        if (appMode === "viewer") {
+          goToNext();
+        } else {
+          await refreshExplorer();
+        }
+      } else {
+        showToast(`${res.length}개 항목 복사 완료`);
+      }
+
+      setShowCopyMoveModal(false);
+    } catch (e: any) {
+      showToast(String(e));
+    }
+  }, [
+    copyMoveTargetFolder,
+    copyMoveMode,
+    copyMoveSourcePaths,
+    copyMoveConflict,
+    settings.recentTargetFolders,
+    updateSettings,
+    showToast,
+    appMode,
+    goToNext,
+    refreshExplorer,
+  ]);
+
+  // 10단계: 새 폴더 만들기 (Ctrl+Shift+N)
+  const handleCreateNewFolder = useCallback(async () => {
+    if (appMode !== "explorer" || !currentExplorerPath) return;
+    try {
+      const newPath = await invoke<string>("create_new_folder", {
+        parentPath: currentExplorerPath,
+        folderName: null,
+      });
+      showToast(`새 폴더 생성 완료: ${baseName(newPath)}`);
+      await refreshExplorer();
+      setSelectedPaths(new Set([newPath]));
+      openRenameModal({ path: newPath, oldName: baseName(newPath), isDir: true });
+    } catch (e: any) {
+      showToast(String(e));
+    }
+  }, [appMode, currentExplorerPath, refreshExplorer, openRenameModal, showToast]);
+
+  // 10단계: 실행 취소 (Ctrl+Z)
+  const handleUndo = useCallback(async () => {
+    try {
+      const msg = await invoke<string>("undo_last_action");
+      showToast(msg);
+      setUndoCount((c) => Math.max(0, c - 1));
+      if (appMode === "explorer") {
+        await refreshExplorer();
+      } else if (appMode === "viewer") {
+        if (view.kind === "image" && view.path) {
+          openPath(view.path);
+        } else if (currentExplorerPath) {
+          openPath(currentExplorerPath);
+        }
+      }
+    } catch (e: any) {
+      showToast(String(e));
+    }
+  }, [appMode, view, currentExplorerPath, refreshExplorer, openPath, showToast]);
+
+  // 10단계: 외부 편집기로 열기 (Ctrl+E)
+  const handleOpenExternalEditor = useCallback(
+    async (customAppPath?: string) => {
+      let targetPath = "";
+      if (appMode === "viewer") {
+        if (view.kind === "image" && view.path && !view.isArchive) {
+          targetPath = view.path;
+        }
+      } else {
+        if (selectedPaths.size > 0) {
+          targetPath = Array.from(selectedPaths)[0];
+        }
+      }
+      if (!targetPath) {
+        showToast("열 대상 이미지가 없습니다.");
+        return;
+      }
+      try {
+        await invoke("open_in_external_editor", {
+          path: targetPath,
+          customApp: customAppPath || null,
+        });
+      } catch (e: any) {
+        showToast(String(e));
+      }
+    },
+    [appMode, view, selectedPaths, showToast]
+  );
+
+  // 10단계: 바탕화면 배경으로 설정 (우클릭 메뉴)
+  const handleSetWallpaper = useCallback(
+    async (style: "fill" | "fit" | "center") => {
+      if (view.kind !== "image") return;
+      try {
+        await invoke("set_as_desktop_wallpaper", {
+          imagePath: view.path,
+          style,
+          isArchive: Boolean(view.isArchive),
+          archivePath: view.isArchive ? view.path : null,
+          entryName: view.isArchive ? view.fileName : null,
+        });
+        showToast(
+          `바탕화면 배경으로 설정되었습니다 (${
+            style === "fill" ? "채우기" : style === "fit" ? "맞춤" : "가운데"
+          })`
+        );
+      } catch (e: any) {
+        showToast(`바탕화면 설정 실패: ${String(e)}`);
+      }
+    },
+    [view, showToast]
+  );
+
+  // 10단계: 탐색기 모드에서 Ctrl+C (파일 복사)
+  const handleExplorerCopyFiles = useCallback(async () => {
+    if (selectedPaths.size === 0) return;
+    try {
+      const paths = Array.from(selectedPaths);
+      await invoke("copy_files_to_clipboard", { paths });
+      showToast(`${paths.length}개 파일 복사 완료 (윈도우 탐색기에서 붙여넣기 가능)`);
+    } catch (e: any) {
+      showToast(String(e));
+    }
+  }, [selectedPaths, showToast]);
+
+  // 10단계: 클립보드 붙여넣기 (Ctrl+V)
+  const handleClipboardPaste = useCallback(async () => {
+    if (appMode === "explorer") {
+      if (!currentExplorerPath) return;
+      try {
+        const pasted = await invoke<string[]>("paste_files_from_clipboard", {
+          targetFolder: currentExplorerPath,
+        });
+        if (pasted.length > 0) {
+          showToast(`${pasted.length}개 파일 붙여넣기 완료`);
+          await refreshExplorer();
+        } else {
+          showToast("클립보드에 복사된 파일이 없습니다.");
+        }
+      } catch (e: any) {
+        showToast(String(e));
+      }
+    } else {
+      // 뷰어 모드: 캡처된 클립보드 이미지 열기
+      try {
+        const clipboardItems = await navigator.clipboard.read();
+        for (const item of clipboardItems) {
+          const imageType = item.types.find((t) => t.startsWith("image/"));
+          if (imageType) {
+            const blob = await item.getType(imageType);
+            const reader = new FileReader();
+            reader.onload = () => {
+              const dataUrl = reader.result as string;
+              setAppMode("viewer");
+              setView({
+                kind: "image",
+                src: dataUrl,
+                fileName: "클립보드 이미지",
+                path: "",
+                isArchive: false,
+                isClipboard: true,
+                clipboardData: dataUrl,
+              });
+              setCurrentIndex(-1);
+              setWindowTitle("클립보드 이미지");
+              showToast("클립보드 이미지를 열었습니다. (Ctrl+S로 저장)");
+            };
+            reader.readAsDataURL(blob);
+            return;
+          }
+        }
+        showToast("클립보드에 이미지가 없습니다.");
+      } catch (err) {
+        showToast("클립보드 이미지를 읽을 수 없습니다: " + String(err));
+      }
+    }
+  }, [appMode, currentExplorerPath, refreshExplorer, showToast]);
+
+  // 10단계: 최근 열어본 항목 클릭 처리 (파일 부재 시 목록에서 제거)
+  const handleOpenRecentItem = useCallback(
+    async (item: RecentItem) => {
+      setShowRecentDropdown(false);
+      try {
+        const exists = await invoke<boolean>("check_path_exists", { path: item.path });
+        if (!exists) {
+          showToast("파일/폴더를 찾을 수 없어 목록에서 제거합니다.");
+          setSettings((prev) => {
+            const updated = (prev.recentItems || []).filter((i) => i.path !== item.path);
+            const newSettings = { ...prev, recentItems: updated };
+            invoke("save_settings", { settings: newSettings }).catch(console.error);
+            return newSettings;
+          });
+          return;
+        }
+        if (item.isFolder) {
+          setAppMode("explorer");
+          navigateToExplorerFolder(item.path);
+        } else {
+          setAppMode("viewer");
+          openPath(item.path);
+        }
+      } catch {
+        showToast("열기 실패: 파일/폴더를 확인할 수 없습니다.");
+      }
+    },
+    [navigateToExplorerFolder, openPath, showToast]
+  );
+
+  // 최근 항목 존재 여부 일괄 검사
+  useEffect(() => {
+    if (showRecentDropdown || appMode === "explorer") {
+      const rItems = settings.recentItems || [];
+      if (rItems.length === 0) return;
+      Promise.all(
+        rItems.map(async (item) => {
+          try {
+            const exists = await invoke<boolean>("check_path_exists", { path: item.path });
+            return [item.path, exists] as const;
+          } catch {
+            return [item.path, false] as const;
+          }
+        })
+      ).then((pairs) => {
+        setItemExistsMap(Object.fromEntries(pairs));
+      });
+    }
+  }, [showRecentDropdown, appMode, settings.recentItems]);
+
+  // 10단계: 즐겨찾기 폴더 토글 및 순서 변경
+  const handleToggleFavoriteFolder = useCallback(
+    (folderPath: string) => {
+      setSettings((prev) => {
+        const list = prev.favoriteFolders || [];
+        const exists = list.includes(folderPath);
+        const updated = exists ? list.filter((p) => p !== folderPath) : [...list, folderPath];
+        const newSettings = { ...prev, favoriteFolders: updated };
+        invoke("save_settings", { settings: newSettings }).catch(console.error);
+        showToast(exists ? "즐겨찾기에서 제거했습니다." : "즐겨찾기에 추가했습니다.");
+        return newSettings;
+      });
+    },
+    [showToast]
+  );
+
+  const handleReorderFavoriteFolders = useCallback((fromIdx: number, toIdx: number) => {
+    if (fromIdx === toIdx) return;
+    setSettings((prev) => {
+      const list = [...(prev.favoriteFolders || [])];
+      const [moved] = list.splice(fromIdx, 1);
+      list.splice(toIdx, 0, moved);
+      const newSettings = { ...prev, favoriteFolders: list };
+      invoke("save_settings", { settings: newSettings }).catch(console.error);
+      return newSettings;
+    });
+  }, []);
+
+  // 10단계: 외부 편집기 등록/삭제
+  const handleBrowseEditorPath = useCallback(async () => {
+    const selected = await open({
+      multiple: false,
+      filters: [{ name: "실행 프로그램", extensions: ["exe"] }],
+    });
+    if (selected && typeof selected === "string") {
+      setNewEditorPath(selected);
+      if (!newEditorName.trim()) {
+        const base = baseName(selected).replace(/\.exe$/i, "");
+        setNewEditorName(base);
+      }
+    }
+  }, [newEditorName]);
+
+  const handleAddExternalEditor = useCallback(() => {
+    if (!newEditorName.trim() || !newEditorPath.trim()) {
+      showToast("프로그램 이름과 실행 파일 경로를 모두 입력해주세요.");
+      return;
+    }
+    const newEd: ExternalEditor = {
+      id: Date.now().toString(),
+      name: newEditorName.trim(),
+      path: newEditorPath.trim(),
+    };
+    setSettings((prev) => {
+      const updated = [...(prev.externalEditors || []), newEd];
+      const newSettings = { ...prev, externalEditors: updated };
+      invoke("save_settings", { settings: newSettings }).catch(console.error);
+      return newSettings;
+    });
+    setNewEditorName("");
+    setNewEditorPath("");
+    showToast(`편집기 "${newEd.name}" 등록 완료`);
+  }, [newEditorName, newEditorPath, showToast]);
+
+  const handleRemoveExternalEditor = useCallback((id: string) => {
+    setSettings((prev) => {
+      const updated = (prev.externalEditors || []).filter((ed) => ed.id !== id);
+      const newSettings = { ...prev, externalEditors: updated };
+      invoke("save_settings", { settings: newSettings }).catch(console.error);
+      return newSettings;
+    });
+  }, []);
+
+  // 7단계 & 8단계 & 9단계 & 10단계 (구조 정리): 모든 명령을 단일 목록(Command Registry)에 정의
   const commandState = useMemo(
     () => ({
       appMode,
@@ -1301,9 +2250,14 @@ function App() {
       showFilmstrip,
       showInfoPanel,
       isFullscreen,
-      canSaveCopy: view.kind === "image" && !view.isArchive && rotation !== 0,
+      canSaveCopy: view.kind === "image" && !view.isArchive && (rotation !== 0 || flipH || flipV),
       canGoUp: Boolean(explorerResult?.parentPath),
       hasSelectedItems: selectedPaths.size > 0,
+      isSlideshowActive,
+      isPixelated: settings.interpolation === "pixelated",
+      isFlippedH: flipH,
+      isFlippedV: flipV,
+      canUndo: undoCount > 0,
     }),
     [
       appMode,
@@ -1316,6 +2270,11 @@ function App() {
       rotation,
       explorerResult?.parentPath,
       selectedPaths.size,
+      isSlideshowActive,
+      settings.interpolation,
+      flipH,
+      flipV,
+      undoCount,
     ]
   );
 
@@ -1363,6 +2322,27 @@ function App() {
           explorerUp: goToParentFolder,
           explorerRefresh: refreshExplorer,
           openViewerFromExplorer: openSelectedInViewer,
+          flipH: () => setFlipH((f) => !f),
+          flipV: () => setFlipV((f) => !f),
+          saveAs: () => openSaveAsModal(),
+          resizeImage: () => openResizeModal(),
+          printImage: handlePrint,
+          toggleSlideshow,
+          toggleInterpolation: () =>
+            updateSettings({
+              interpolation: settings.interpolation === "smooth" ? "pixelated" : "smooth",
+            }),
+          toggleSortMenu: () => setShowSortDropdown((p) => !p),
+          // 10단계 새 액션 바인딩
+          rename: () => openRenameModal(),
+          copyToFolder: () => openCopyMoveModal("copy"),
+          moveToFolder: () => openCopyMoveModal("move"),
+          newFolder: handleCreateNewFolder,
+          undo: handleUndo,
+          openExternalEditor: () => void handleOpenExternalEditor(),
+          setWallpaper: () => void handleSetWallpaper("fill"),
+          pasteClipboard: handleClipboardPaste,
+          copyFiles: handleExplorerCopyFiles,
         },
         commandState
       ),
@@ -1390,6 +2370,20 @@ function App() {
       refreshExplorer,
       openSelectedInViewer,
       commandState,
+      openSaveAsModal,
+      openResizeModal,
+      handlePrint,
+      toggleSlideshow,
+      updateSettings,
+      settings.interpolation,
+      openRenameModal,
+      openCopyMoveModal,
+      handleCreateNewFolder,
+      handleUndo,
+      handleOpenExternalEditor,
+      handleSetWallpaper,
+      handleClipboardPaste,
+      handleExplorerCopyFiles,
     ]
   );
 
@@ -1422,10 +2416,64 @@ function App() {
         return;
       }
 
+      if (showRenameModal) {
+        if (e.code === "Enter" || e.code === "NumpadEnter") {
+          e.preventDefault();
+          void executeRename();
+          return;
+        }
+        if (e.code === "Escape") {
+          e.preventDefault();
+          setShowRenameModal(false);
+          return;
+        }
+        return;
+      }
+
+      if (showCopyMoveModal) {
+        if (e.code === "Enter" || e.code === "NumpadEnter") {
+          e.preventDefault();
+          void executeCopyMove();
+          return;
+        }
+        if (e.code === "Escape") {
+          e.preventDefault();
+          setShowCopyMoveModal(false);
+          return;
+        }
+        return;
+      }
+
+      if (showRecentDropdown) {
+        if (e.code === "Escape") {
+          e.preventDefault();
+          setShowRecentDropdown(false);
+          return;
+        }
+      }
+
       if (showSettingsModal) {
         if (e.code === "Escape") {
           e.preventDefault();
           setShowSettingsModal(false);
+          return;
+        }
+        return;
+      }
+
+      if (showSaveAsModal) {
+        if (e.code === "Escape") {
+          e.preventDefault();
+          setShowSaveAsModal(false);
+          return;
+        }
+        return;
+      }
+
+      if (showResizeModal) {
+        if (e.code === "Escape") {
+          e.preventDefault();
+          setShowResizeModal(false);
           return;
         }
         return;
@@ -1440,11 +2488,48 @@ function App() {
         return;
       }
 
+      if (showSortDropdown) {
+        if (e.code === "Escape") {
+          e.preventDefault();
+          setShowSortDropdown(false);
+          return;
+        }
+      }
+
       // 우클릭 컨텍스트 메뉴가 열려있을 때 Escape로 닫기
       if (contextMenu !== null) {
         if (e.code === "Escape") {
           e.preventDefault();
           setContextMenu(null);
+          return;
+        }
+      }
+
+      // 9단계: 슬라이드쇼 중 특수 조작 (Space 일시정지, 좌우 수동 이동, Escape 종료)
+      if (isSlideshowActive) {
+        if (e.code === "Escape") {
+          e.preventDefault();
+          stopSlideshow();
+          return;
+        }
+        if (e.code === "Space") {
+          e.preventDefault();
+          setIsSlideshowPaused((p) => !p);
+          setShowSlideshowBadge(true);
+          return;
+        }
+        if (e.code === "ArrowRight") {
+          e.preventDefault();
+          goToNext();
+          setSlideshowRemainingSec(settingsRef.current.slideshowInterval || 3);
+          setShowSlideshowBadge(true);
+          return;
+        }
+        if (e.code === "ArrowLeft") {
+          e.preventDefault();
+          goToPrev();
+          setSlideshowRemainingSec(settingsRef.current.slideshowInterval || 3);
+          setShowSlideshowBadge(true);
           return;
         }
       }
@@ -1517,7 +2602,11 @@ function App() {
   }, [
     showDeleteModal,
     showSettingsModal,
+    showSaveAsModal,
+    showResizeModal,
     showHelpModal,
+    showSortDropdown,
+    isSlideshowActive,
     contextMenu,
     showInfoPanel,
     isFullscreen,
@@ -1528,6 +2617,9 @@ function App() {
     exitFullscreen,
     returnToExplorer,
     handleGridKeyNavigation,
+    stopSlideshow,
+    goToNext,
+    goToPrev,
   ]);
 
   // 마우스 뒤/앞 버튼
@@ -1554,26 +2646,56 @@ function App() {
     };
   }, [goToPrev, goToNext]);
 
-  // 마우스 휠 줌
-  const onWheel = useCallback((e: React.WheelEvent) => {
-    if (view.kind !== "image" || !metaRef.current) return;
-    e.preventDefault();
+  // 9단계: 마우스 휠 동작 (Ctrl+휠은 항상 확대/축소, 너비 맞춤일 때는 스크롤, 그 외 설정에 따라 이전/다음 또는 확대/축소)
+  const onWheel = useCallback(
+    (e: React.WheelEvent) => {
+      if (view.kind !== "image" || !metaRef.current) return;
+      e.preventDefault();
 
-    const el = viewerRef.current;
-    if (!el) return;
-    const rect = el.getBoundingClientRect();
-    const cx = e.clientX - rect.left;
-    const cy = e.clientY - rect.top;
+      const el = viewerRef.current;
+      if (!el) return;
+      const rect = el.getBoundingClientRect();
+      const cx = e.clientX - rect.left;
+      const cy = e.clientY - rect.top;
 
-    let factor: number;
-    if (e.ctrlKey) {
-      factor = Math.exp(-e.deltaY * 0.015);
-    } else {
-      factor = e.deltaY < 0 ? 1.18 : 1 / 1.18;
-    }
+      // 1. Ctrl + 휠: 항상 커서 중심 확대/축소
+      if (e.ctrlKey) {
+        const factor = Math.exp(-e.deltaY * 0.015);
+        zoomAtPoint(cx, cy, factor);
+        return;
+      }
 
-    zoomAtPoint(cx, cy, factor);
-  }, [view.kind, zoomAtPoint]);
+      // 2. "너비에 맞춤" 모드일 때는 위아래 스크롤(패닝)로 동작
+      if (settingsRef.current.zoomMode === "fitWidth") {
+        const dpr = window.devicePixelRatio || 1;
+        const m = metaRef.current;
+        const totalW = isDoublePage && secondMetaRef.current ? m.naturalWidth + secondMetaRef.current.naturalWidth : m.naturalWidth;
+        const maxH = isDoublePage && secondMetaRef.current ? Math.max(m.naturalHeight, secondMetaRef.current.naturalHeight) : m.naturalHeight;
+        const bw = totalW / dpr;
+        const bh = maxH / dpr;
+        const cur = transformRef.current;
+        const nextY = cur.y - e.deltaY;
+        const clamped = clampPosition(cur.x, nextY, cur.scale, bw, bh, el.clientWidth, el.clientHeight, rotationRef.current);
+        setTransform((prev) => ({ ...prev, y: clamped.y }));
+        return;
+      }
+
+      // 3. 설정에 따른 동작
+      if (settingsRef.current.wheelAction === "navigate") {
+        // 꿀뷰 방식: 이전 / 다음 사진 넘김
+        if (e.deltaY > 0) {
+          goToNext();
+        } else if (e.deltaY < 0) {
+          goToPrev();
+        }
+      } else {
+        // 확대 / 축소
+        const factor = e.deltaY < 0 ? 1.18 : 1 / 1.18;
+        zoomAtPoint(cx, cy, factor);
+      }
+    },
+    [view.kind, zoomAtPoint, goToNext, goToPrev, isDoublePage]
+  );
 
   // 마우스 패닝
   const onMouseDown = useCallback((e: React.MouseEvent) => {
@@ -1799,9 +2921,14 @@ function App() {
 
     const el = viewerRef.current;
     if (el) {
-      const t = getFitTransform(el.clientWidth, el.clientHeight, nw, nh);
-      setTransform(t);
-      setIsFit(true);
+      if (!settingsRef.current.keepTransform) {
+        const t = getInitialTransform(el.clientWidth, el.clientHeight, nw, nh, rotationRef.current);
+        setTransform(t);
+        setIsFit(
+          settingsRef.current.zoomMode === "fitIfLarge" ||
+            settingsRef.current.zoomMode === "fitAlways"
+        );
+      }
     }
   };
 
@@ -1831,6 +2958,29 @@ function App() {
   const nextItem = isDoublePage && currentIndex + 1 < items.length ? items[currentIndex + 1] : null;
   const secondSrc = nextItem?.path ? convertFileSrc(nextItem.path) : null;
 
+  // 회전 각도에 따른 라디안 및 삼각함수
+  const rad = (rotation * Math.PI) / 180;
+  const cos = Math.round(Math.cos(rad));
+  const sin = Math.round(Math.sin(rad));
+
+  // 단면 보기: 회전 후 중심축 기준 좌우/상하 반전 변환식 (화면 위치 고정)
+  const rotCenterX = (baseWidth / 2) * cos - (baseHeight / 2) * sin;
+  const rotCenterY = (baseWidth / 2) * sin + (baseHeight / 2) * cos;
+  const flipTransform =
+    flipH || flipV
+      ? ` translate(${rotCenterX}px, ${rotCenterY}px) scale(${flipH ? -1 : 1}, ${flipV ? -1 : 1}) translate(${-rotCenterX}px, ${-rotCenterY}px)`
+      : "";
+
+  // 양면 보기: 회전 후 중심축 기준 좌우/상하 반전 변환식 (화면 위치 고정)
+  const doubleTotalW = baseWidth + (secondSrc ? secondBaseWidth + 4 : 0);
+  const doubleMaxH = Math.max(baseHeight, secondSrc ? secondBaseHeight : 0);
+  const doubleRotCenterX = (doubleTotalW / 2) * cos - (doubleMaxH / 2) * sin;
+  const doubleRotCenterY = (doubleTotalW / 2) * sin + (doubleMaxH / 2) * cos;
+  const doubleFlipTransform =
+    flipH || flipV
+      ? ` translate(${doubleRotCenterX}px, ${doubleRotCenterY}px) scale(${flipH ? -1 : 1}, ${flipV ? -1 : 1}) translate(${-doubleRotCenterX}px, ${-doubleRotCenterY}px)`
+      : "";
+
   // 가상 스크롤 렌더링 범위 계산 (필름스트립)
   const visibleCount = Math.ceil(filmstripWidth / THUMB_ITEM_WIDTH);
   const startThumbIdx = Math.max(0, Math.floor(filmstripScrollLeft / THUMB_ITEM_WIDTH) - 2);
@@ -1842,7 +2992,7 @@ function App() {
   const explorerItemWidth = thumbnailSize + 16;
   const explorerItemHeight = thumbnailSize + 52;
   const explorerCols = Math.max(1, Math.floor(gridDimensions.width / explorerItemWidth));
-  const totalExplorerItems = explorerResult?.items.length ?? 0;
+  const totalExplorerItems = filteredExplorerItems.length;
   const totalExplorerRows = Math.ceil(totalExplorerItems / explorerCols);
   const startExplorerRow = Math.max(0, Math.floor(gridScrollTop / explorerItemHeight) - 2);
   const endExplorerRow = Math.min(
@@ -1852,8 +3002,8 @@ function App() {
   const startExplorerIdx = startExplorerRow * explorerCols;
   const endExplorerIdx = Math.min(totalExplorerItems - 1, (endExplorerRow + 1) * explorerCols - 1);
   const visibleExplorerItems =
-    startExplorerIdx <= endExplorerIdx && explorerResult
-      ? explorerResult.items.slice(startExplorerIdx, endExplorerIdx + 1)
+    startExplorerIdx <= endExplorerIdx
+      ? filteredExplorerItems.slice(startExplorerIdx, endExplorerIdx + 1)
       : [];
   const topExplorerSpacerHeight = startExplorerRow * explorerItemHeight;
   const bottomExplorerSpacerHeight = Math.max(
@@ -1884,6 +3034,45 @@ function App() {
       }
     }
   }, [appMode, visibleExplorerItems, explorerThumbnails]);
+
+  // 10단계: 툴바 열기 버튼 옆 최근 항목 드롭다운
+  const renderRecentDropdown = () => (
+    <div
+      className="recent-items-dropdown glass-panel"
+      onClick={(e) => e.stopPropagation()}
+    >
+      <div className="recent-dropdown-header">
+        <Clock size={13} style={{ marginRight: "4px" }} />
+        <span>최근 열어본 항목 (최대 10개)</span>
+      </div>
+      {(!settings.recentItems || settings.recentItems.length === 0) ? (
+        <div className="recent-dropdown-empty">최근 항목이 없습니다.</div>
+      ) : (
+        <div className="recent-dropdown-list">
+          {settings.recentItems.map((item) => {
+            const isMissing = itemExistsMap[item.path] === false;
+            return (
+              <button
+                key={item.path}
+                type="button"
+                className={`recent-dropdown-item${isMissing ? " is-missing" : ""}`}
+                onClick={() => void handleOpenRecentItem(item)}
+                title={isMissing ? `${item.path} (삭제됨 - 클릭 시 목록에서 제거)` : item.path}
+              >
+                {item.isFolder ? (
+                  <Folder size={14} className="recent-icon" />
+                ) : (
+                  <ImageIcon size={14} className="recent-icon" />
+                )}
+                <span className="recent-name">{item.name}</span>
+                <span className="recent-path">{item.path}</span>
+              </button>
+            );
+          })}
+        </div>
+      )}
+    </div>
+  );
 
   // 재사용 가능한 우측 정보 패널 렌더링
   const renderInfoPanel = () => {
@@ -2097,12 +3286,40 @@ function App() {
             </div>
 
             {settings.showToolbar && (
-              <div className="explorer-toolbar">
+              <div className="explorer-toolbar" style={{ position: "relative" }}>
                 {TOOLBAR_GROUPS_EXPLORER.map((group, groupIdx) => (
                   <div key={groupIdx} className="toolbar-group">
                     {group.map((cmdId) => {
                       const cmd = commandMap.get(cmdId);
                       if (!cmd) return null;
+                      if (cmd.id === "open") {
+                        return (
+                          <div key={cmd.id} style={{ position: "relative", display: "inline-flex" }}>
+                            <button
+                              id={`explorer-toolbar-btn-${cmd.id}`}
+                              className={`glass-button toolbar-icon-btn${cmd.isActive ? " is-active" : ""}`}
+                              onClick={() => void cmd.action()}
+                              disabled={!cmd.isEnabled}
+                              title={`${cmd.label}${cmd.shortcutDisplay ? ` (${cmd.shortcutDisplay})` : ""}`}
+                              aria-label={cmd.label}
+                            >
+                              {cmd.icon}
+                            </button>
+                            <button
+                              className="glass-button toolbar-arrow-btn"
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                setShowRecentDropdown((p) => !p);
+                              }}
+                              title="최근 항목 (10개)"
+                              aria-label="최근 항목"
+                            >
+                              <ChevronDown size={12} />
+                            </button>
+                            {showRecentDropdown && renderRecentDropdown()}
+                          </div>
+                        );
+                      }
                       return (
                         <button
                           key={cmd.id}
@@ -2120,6 +3337,106 @@ function App() {
                     {groupIdx < TOOLBAR_GROUPS_EXPLORER.length - 1 && <div className="toolbar-divider" />}
                   </div>
                 ))}
+
+                {/* 10단계: 파일 형식 필터 드롭다운 */}
+                <div className="explorer-filter-select-wrapper">
+                  <Filter size={13} className="filter-icon" />
+                  <select
+                    className="glass-select explorer-filter-select"
+                    value={settings.explorerFilter || "all"}
+                    onChange={(e) => updateSettings({ explorerFilter: e.target.value as ExplorerFilter })}
+                    title="파일 형식 필터"
+                  >
+                    <option value="all">전체 형식</option>
+                    <option value="jpg">JPG (*.jpg, *.jpeg)</option>
+                    <option value="png">PNG (*.png)</option>
+                    <option value="gif">GIF (*.gif)</option>
+                    <option value="webp">WebP (*.webp)</option>
+                    <option value="other">기타 형식</option>
+                  </select>
+                </div>
+
+                {/* 9단계: 탐색기 모드 정렬 드롭다운 메뉴 */}
+                {showSortDropdown && (
+                  <div
+                    className="sort-dropdown-menu"
+                    style={{ top: "38px", right: "10px" }}
+                    onClick={(e) => e.stopPropagation()}
+                  >
+                    <div className="sort-menu-header">정렬 기준</div>
+                    <button
+                      className={`sort-menu-item${settings.sortBy === "name" ? " is-active" : ""}`}
+                      onClick={() => {
+                        updateSettings({ sortBy: "name" });
+                        setShowSortDropdown(false);
+                      }}
+                    >
+                      <span>이름 (자연 정렬)</span>
+                      {settings.sortBy === "name" && <Check size={14} />}
+                    </button>
+                    <button
+                      className={`sort-menu-item${settings.sortBy === "dateModified" ? " is-active" : ""}`}
+                      onClick={() => {
+                        updateSettings({ sortBy: "dateModified" });
+                        setShowSortDropdown(false);
+                      }}
+                    >
+                      <span>수정 날짜</span>
+                      {settings.sortBy === "dateModified" && <Check size={14} />}
+                    </button>
+                    <button
+                      className={`sort-menu-item${settings.sortBy === "dateTaken" ? " is-active" : ""}`}
+                      onClick={() => {
+                        updateSettings({ sortBy: "dateTaken" });
+                        setShowSortDropdown(false);
+                      }}
+                    >
+                      <span>촬영 날짜 (EXIF)</span>
+                      {settings.sortBy === "dateTaken" && <Check size={14} />}
+                    </button>
+                    <button
+                      className={`sort-menu-item${settings.sortBy === "fileSize" ? " is-active" : ""}`}
+                      onClick={() => {
+                        updateSettings({ sortBy: "fileSize" });
+                        setShowSortDropdown(false);
+                      }}
+                    >
+                      <span>크기</span>
+                      {settings.sortBy === "fileSize" && <Check size={14} />}
+                    </button>
+                    <button
+                      className={`sort-menu-item${settings.sortBy === "fileType" ? " is-active" : ""}`}
+                      onClick={() => {
+                        updateSettings({ sortBy: "fileType" });
+                        setShowSortDropdown(false);
+                      }}
+                    >
+                      <span>형식 (확장자)</span>
+                      {settings.sortBy === "fileType" && <Check size={14} />}
+                    </button>
+                    <div className="sort-menu-divider" />
+                    <button
+                      className={`sort-menu-item${settings.sortOrder === "asc" ? " is-active" : ""}`}
+                      onClick={() => {
+                        updateSettings({ sortOrder: "asc" });
+                        setShowSortDropdown(false);
+                      }}
+                    >
+                      <span>오름차순 (▲)</span>
+                      {settings.sortOrder === "asc" && <Check size={14} />}
+                    </button>
+                    <button
+                      className={`sort-menu-item${settings.sortOrder === "desc" ? " is-active" : ""}`}
+                      onClick={() => {
+                        updateSettings({ sortOrder: "desc" });
+                        setShowSortDropdown(false);
+                      }}
+                    >
+                      <span>내림차순 (▼)</span>
+                      {settings.sortOrder === "desc" && <Check size={14} />}
+                    </button>
+                  </div>
+                )}
               </div>
             )}
           </header>
@@ -2129,7 +3446,53 @@ function App() {
             {/* 좌측 폴더 트리 패널 */}
             <aside className="explorer-tree-panel" style={{ width: `${folderTreeWidth}px` }}>
               <div className="explorer-tree-scroll">
-                <div className="tree-section-title">빠른 바로가기</div>
+                {/* 10단계: 즐겨찾기 폴더 (드래그로 순서 변경) */}
+                <div className="tree-section-title">
+                  <Star size={13} style={{ display: "inline", verticalAlign: "middle", marginRight: "4px", color: "var(--accent)" }} />
+                  즐겨찾기
+                </div>
+                {(!settings.favoriteFolders || settings.favoriteFolders.length === 0) ? (
+                  <div className="fav-empty-hint">폴더 우클릭 → 즐겨찾기 추가</div>
+                ) : (
+                  settings.favoriteFolders.map((favPath, idx) => (
+                    <div
+                      key={favPath}
+                      draggable
+                      onDragStart={() => setDraggedFavIdx(idx)}
+                      onDragOver={(e) => e.preventDefault()}
+                      onDrop={() => {
+                        if (draggedFavIdx !== null) {
+                          handleReorderFavoriteFolders(draggedFavIdx, idx);
+                          setDraggedFavIdx(null);
+                        }
+                      }}
+                      className={`tree-item favorite-item${currentExplorerPath.toLowerCase() === favPath.toLowerCase() ? " is-active" : ""}`}
+                      onClick={() => navigateToExplorerFolder(favPath)}
+                      title={`${favPath} (드래그하여 순서 변경, 우클릭 시 제거)`}
+                      onContextMenu={(e) => {
+                        e.preventDefault();
+                        e.stopPropagation();
+                        handleToggleFavoriteFolder(favPath);
+                      }}
+                    >
+                      <Folder className="tree-icon" size={16} />
+                      <span className="tree-label">{baseName(favPath)}</span>
+                      <button
+                        type="button"
+                        className="fav-remove-btn"
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          handleToggleFavoriteFolder(favPath);
+                        }}
+                        title="즐겨찾기에서 제거"
+                      >
+                        ✕
+                      </button>
+                    </div>
+                  ))
+                )}
+
+                <div className="tree-section-title" style={{ marginTop: "12px" }}>빠른 바로가기</div>
                 {systemLocations
                   .filter((loc) => loc.kind === "quickAccess")
                   .map((loc) => (
@@ -2137,11 +3500,50 @@ function App() {
                       key={loc.path}
                       className={`tree-item${currentExplorerPath.toLowerCase() === loc.path.toLowerCase() ? " is-active" : ""}`}
                       onClick={() => navigateToExplorerFolder(loc.path)}
+                      onContextMenu={(e) => {
+                        e.preventDefault();
+                        e.stopPropagation();
+                        handleToggleFavoriteFolder(loc.path);
+                      }}
+                      title={`${loc.name} (우클릭: 즐겨찾기 토글)`}
                     >
                       <Folder className="tree-icon" size={16} />
                       <span className="tree-label">{loc.name}</span>
                     </div>
                   ))}
+
+                {/* 10단계: 최근 열어본 파일·폴더 (최대 10개) */}
+                <div className="tree-section-title" style={{ marginTop: "12px" }}>
+                  <Clock size={13} style={{ display: "inline", verticalAlign: "middle", marginRight: "4px" }} />
+                  최근 항목
+                </div>
+                {(!settings.recentItems || settings.recentItems.length === 0) ? (
+                  <div className="fav-empty-hint">최근 항목 없음</div>
+                ) : (
+                  settings.recentItems.map((item) => {
+                    const isMissing = itemExistsMap[item.path] === false;
+                    return (
+                      <div
+                        key={item.path}
+                        className={`tree-item${isMissing ? " is-missing" : ""}`}
+                        onClick={() => void handleOpenRecentItem(item)}
+                        title={isMissing ? `${item.path} (삭제됨 - 클릭 시 목록에서 제거)` : item.path}
+                      >
+                        {item.isFolder ? (
+                          <Folder className="tree-icon" size={16} />
+                        ) : (
+                          <ImageIcon className="tree-icon" size={16} />
+                        )}
+                        <span
+                          className="tree-label"
+                          style={isMissing ? { opacity: 0.5, textDecoration: "line-through" } : undefined}
+                        >
+                          {item.name}
+                        </span>
+                      </div>
+                    );
+                  })
+                )}
 
                 <div className="tree-section-title" style={{ marginTop: "12px" }}>
                   내 PC
@@ -2243,7 +3645,7 @@ function App() {
                 onScroll={(e) => setGridScrollTop(e.currentTarget.scrollTop)}
                 onClick={() => setSelectedPaths(new Set())}
               >
-                {explorerResult && explorerResult.items.length > 0 ? (
+                {explorerResult && filteredExplorerItems.length > 0 ? (
                   <div
                     className="explorer-virtual-track"
                     style={{
@@ -2270,8 +3672,23 @@ function App() {
                               width: `${explorerItemWidth}px`,
                               height: `${explorerItemHeight}px`,
                             }}
+                            draggable
+                            onDragStart={(e) => {
+                              e.stopPropagation();
+                              const paths = selectedPaths.has(item.path)
+                                ? Array.from(selectedPaths)
+                                : [item.path];
+                              void startDrag({ item: paths, icon: "" });
+                            }}
                             onClick={(e) => handleExplorerItemClick(e, item, absIdx)}
                             onDoubleClick={() => handleExplorerItemDoubleClick(item)}
+                            onContextMenu={(e) => {
+                              e.preventDefault();
+                              if (!selectedPaths.has(item.path)) {
+                                setSelectedPaths(new Set([item.path]));
+                              }
+                              setContextMenu({ x: e.clientX, y: e.clientY });
+                            }}
                             title={`${item.name}${item.size ? ` (${formatFileSize(item.size)})` : ""}`}
                           >
                             <div
@@ -2385,6 +3802,34 @@ function App() {
                     {group.map((cmdId) => {
                       const cmd = commandMap.get(cmdId);
                       if (!cmd) return null;
+                      if (cmd.id === "open") {
+                        return (
+                          <div key={cmd.id} style={{ position: "relative", display: "inline-flex" }}>
+                            <button
+                              id={`toolbar-btn-${cmd.id}`}
+                              className={`glass-button toolbar-icon-btn${cmd.isActive ? " is-active" : ""}`}
+                              onClick={() => void cmd.action()}
+                              disabled={!cmd.isEnabled}
+                              title={`${cmd.label}${cmd.shortcutDisplay ? ` (${cmd.shortcutDisplay})` : ""}`}
+                              aria-label={cmd.label}
+                            >
+                              {cmd.icon}
+                            </button>
+                            <button
+                              className="glass-button toolbar-arrow-btn"
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                setShowRecentDropdown((p) => !p);
+                              }}
+                              title="최근 항목 (10개)"
+                              aria-label="최근 항목"
+                            >
+                              <ChevronDown size={12} />
+                            </button>
+                            {showRecentDropdown && renderRecentDropdown()}
+                          </div>
+                        );
+                      }
                       return (
                         <button
                           key={cmd.id}
@@ -2403,7 +3848,96 @@ function App() {
                   </div>
                 ))}
               </div>
+
+              {/* 9단계: 정렬 드롭다운 메뉴 (툴바 연동) */}
+              {showSortDropdown && (
+                <div
+                  className="sort-dropdown-menu"
+                  style={{ top: "44px", right: "120px" }}
+                  onClick={(e) => e.stopPropagation()}
+                >
+                  <div className="sort-menu-header">정렬 기준</div>
+                  <button
+                    className={`sort-menu-item${settings.sortBy === "name" ? " is-active" : ""}`}
+                    onClick={() => {
+                      updateSettings({ sortBy: "name" });
+                      setShowSortDropdown(false);
+                    }}
+                  >
+                    <span>이름 (자연 정렬)</span>
+                    {settings.sortBy === "name" && <Check size={14} />}
+                  </button>
+                  <button
+                    className={`sort-menu-item${settings.sortBy === "dateModified" ? " is-active" : ""}`}
+                    onClick={() => {
+                      updateSettings({ sortBy: "dateModified" });
+                      setShowSortDropdown(false);
+                    }}
+                  >
+                    <span>수정 날짜</span>
+                    {settings.sortBy === "dateModified" && <Check size={14} />}
+                  </button>
+                  <button
+                    className={`sort-menu-item${settings.sortBy === "dateTaken" ? " is-active" : ""}`}
+                    onClick={() => {
+                      updateSettings({ sortBy: "dateTaken" });
+                      setShowSortDropdown(false);
+                    }}
+                  >
+                    <span>촬영 날짜 (EXIF)</span>
+                    {settings.sortBy === "dateTaken" && <Check size={14} />}
+                  </button>
+                  <button
+                    className={`sort-menu-item${settings.sortBy === "fileSize" ? " is-active" : ""}`}
+                    onClick={() => {
+                      updateSettings({ sortBy: "fileSize" });
+                      setShowSortDropdown(false);
+                    }}
+                  >
+                    <span>크기</span>
+                    {settings.sortBy === "fileSize" && <Check size={14} />}
+                  </button>
+                  <button
+                    className={`sort-menu-item${settings.sortBy === "fileType" ? " is-active" : ""}`}
+                    onClick={() => {
+                      updateSettings({ sortBy: "fileType" });
+                      setShowSortDropdown(false);
+                    }}
+                  >
+                    <span>형식 (확장자)</span>
+                    {settings.sortBy === "fileType" && <Check size={14} />}
+                  </button>
+                  <div className="sort-menu-divider" />
+                  <button
+                    className={`sort-menu-item${settings.sortOrder === "asc" ? " is-active" : ""}`}
+                    onClick={() => {
+                      updateSettings({ sortOrder: "asc" });
+                      setShowSortDropdown(false);
+                    }}
+                  >
+                    <span>오름차순 (▲)</span>
+                    {settings.sortOrder === "asc" && <Check size={14} />}
+                  </button>
+                  <button
+                    className={`sort-menu-item${settings.sortOrder === "desc" ? " is-active" : ""}`}
+                    onClick={() => {
+                      updateSettings({ sortOrder: "desc" });
+                      setShowSortDropdown(false);
+                    }}
+                  >
+                    <span>내림차순 (▼)</span>
+                    {settings.sortOrder === "desc" && <Check size={14} />}
+                  </button>
+                </div>
+              )}
             </nav>
+          )}
+
+          {/* 9단계: 슬라이드쇼 남은 시간 뱃지 */}
+          {isSlideshowActive && (showSlideshowBadge || isSlideshowPaused) && (
+            <div className="slideshow-badge" aria-live="polite">
+              슬라이드쇼 {isSlideshowPaused ? "일시정지" : `${slideshowRemainingSec}초`}
+            </div>
           )}
 
           {/* 상단 정보 바 */}
@@ -2418,6 +3952,8 @@ function App() {
               <span className="top-info-filename">
                 {view.fileName}
                 {rotation !== 0 && ` (${rotation}°)`}
+                {flipH && " [좌우반전]"}
+                {flipV && " [상하반전]"}
               </span>
             </aside>
           )}
@@ -2426,10 +3962,15 @@ function App() {
           {view.kind === "image" && !isDoublePage && (
             <img
               key={view.src}
-              className={`viewer-image${loaded ? " is-loaded" : ""}`}
+              className={`viewer-image${loaded ? " is-loaded" : ""}${
+                settings.interpolation === "pixelated" ? " is-pixelated" : ""
+              }`}
               src={view.src}
-              alt={view.fileName}
-              draggable={false}
+              draggable={Boolean(isFit && view.path && !view.isArchive)}
+              onDragStart={(e) => {
+                e.preventDefault();
+                if (view.path) void startDrag({ item: [view.path], icon: "" });
+              }}
               decoding="async"
               onLoad={handleImageLoad}
               onError={() =>
@@ -2445,7 +3986,7 @@ function App() {
                   ? {
                       width: `${baseWidth}px`,
                       height: `${baseHeight}px`,
-                      transform: `translate3d(${transform.x}px, ${transform.y}px, 0) scale(${transform.scale}) rotate(${rotation}deg)`,
+                      transform: `translate3d(${transform.x}px, ${transform.y}px, 0) scale(${transform.scale})${flipTransform} rotate(${rotation}deg)`,
                     }
                   : undefined
               }
@@ -2457,14 +3998,16 @@ function App() {
             <div
               className="double-view-container"
               style={{
-                transform: `translate3d(${transform.x}px, ${transform.y}px, 0) scale(${transform.scale}) rotate(${rotation}deg)`,
+                transform: `translate3d(${transform.x}px, ${transform.y}px, 0) scale(${transform.scale})${doubleFlipTransform} rotate(${rotation}deg)`,
                 flexDirection: readingDirection === "rtl" ? "row-reverse" : "row",
               }}
             >
               <div className="double-view-page" style={{ width: `${baseWidth}px`, height: `${baseHeight}px` }}>
                 <img
                   key={view.src}
-                  className={`double-view-img${loaded ? " is-loaded" : ""}`}
+                  className={`double-view-img${loaded ? " is-loaded" : ""}${
+                    settings.interpolation === "pixelated" ? " is-pixelated" : ""
+                  }`}
                   src={view.src}
                   alt={view.fileName}
                   draggable={false}
@@ -2478,7 +4021,9 @@ function App() {
                 <div className="double-view-page" style={{ width: `${secondBaseWidth}px`, height: `${secondBaseHeight}px` }}>
                   <img
                     key={secondSrc}
-                    className={`double-view-img${secondLoaded ? " is-loaded" : ""}`}
+                    className={`double-view-img${secondLoaded ? " is-loaded" : ""}${
+                      settings.interpolation === "pixelated" ? " is-pixelated" : ""
+                    }`}
                     src={secondSrc}
                     alt={nextItem?.fileName ?? ""}
                     draggable={false}
@@ -2577,6 +4122,11 @@ function App() {
                       <div
                         key={item.path || item.entryName || absIdx}
                         className={`filmstrip-item${isActive ? " is-active" : ""}`}
+                        draggable={Boolean(item.path && !item.isArchiveEntry)}
+                        onDragStart={(e) => {
+                          e.preventDefault();
+                          if (item.path) void startDrag({ item: [item.path], icon: "" });
+                        }}
                         onClick={() => navigateToIndex(absIdx)}
                         title={item.fileName}
                       >
@@ -2671,7 +4221,7 @@ function App() {
         </div>
       )}
 
-      {/* 6단계: 환경 설정 모달 (Ctrl+,) */}
+      {/* 6단계 & 9단계: 환경 설정 모달 (Ctrl+,) */}
       {showSettingsModal && (
         <div
           className="modal-overlay"
@@ -2693,132 +4243,690 @@ function App() {
               </button>
             </div>
 
+            {/* 9단계: 탭 바 (일반 / 보기) */}
+            <div className="settings-tab-bar">
+              <button
+                className={`settings-tab-btn${settingsTab === "general" ? " is-active" : ""}`}
+                onClick={() => setSettingsTab("general")}
+              >
+                일반 설정
+              </button>
+              <button
+                className={`settings-tab-btn${settingsTab === "view" ? " is-active" : ""}`}
+                onClick={() => setSettingsTab("view")}
+              >
+                보기 설정
+              </button>
+            </div>
+
             <div className="settings-body">
-              <div className="setting-group">
-                <label className="setting-label">화면 테마</label>
-                <div className="setting-options">
-                  <button
-                    className={`setting-chip${settings.theme === "dark" ? " is-active" : ""}`}
-                    onClick={() => updateSettings({ theme: "dark" })}
-                  >
-                    다크 테마 (Dark)
-                  </button>
-                  <button
-                    className={`setting-chip${settings.theme === "light" ? " is-active" : ""}`}
-                    onClick={() => updateSettings({ theme: "light" })}
-                  >
-                    라이트 테마 (Light)
-                  </button>
-                </div>
-              </div>
-
-              <div className="setting-group">
-                <label className="setting-label">기본 배경색</label>
-                <div className="setting-options">
-                  <button
-                    className={`setting-chip${settings.defaultBg === "black" ? " is-active" : ""}`}
-                    onClick={() => updateSettings({ defaultBg: "black" })}
-                  >
-                    검정색 (#000)
-                  </button>
-                  <button
-                    className={`setting-chip${settings.defaultBg === "dark" ? " is-active" : ""}`}
-                    onClick={() => updateSettings({ defaultBg: "dark" })}
-                  >
-                    짙은 회색 (#181a20)
-                  </button>
-                  <button
-                    className={`setting-chip${settings.defaultBg === "checker" ? " is-active" : ""}`}
-                    onClick={() => updateSettings({ defaultBg: "checker" })}
-                  >
-                    체크무늬 (투명 확인)
-                  </button>
-                </div>
-              </div>
-
-              <div className="setting-group">
-                <label className="setting-label">이미지 목록 정렬</label>
-                <div className="setting-options-row">
-                  <div className="setting-options">
-                    <button
-                      className={`setting-chip${settings.sortBy === "name" ? " is-active" : ""}`}
-                      onClick={() => updateSettings({ sortBy: "name" })}
-                    >
-                      파일명순 (자연 정렬)
-                    </button>
-                    <button
-                      className={`setting-chip${settings.sortBy === "dateModified" ? " is-active" : ""}`}
-                      onClick={() => updateSettings({ sortBy: "dateModified" })}
-                    >
-                      수정 날짜순
-                    </button>
-                    <button
-                      className={`setting-chip${settings.sortBy === "fileSize" ? " is-active" : ""}`}
-                      onClick={() => updateSettings({ sortBy: "fileSize" })}
-                    >
-                      파일 크기순
-                    </button>
+              {settingsTab === "general" ? (
+                <>
+                  <div className="setting-group">
+                    <label className="setting-label">화면 테마</label>
+                    <div className="setting-options">
+                      <button
+                        className={`setting-chip${settings.theme === "dark" ? " is-active" : ""}`}
+                        onClick={() => updateSettings({ theme: "dark" })}
+                      >
+                        다크 테마 (Dark)
+                      </button>
+                      <button
+                        className={`setting-chip${settings.theme === "light" ? " is-active" : ""}`}
+                        onClick={() => updateSettings({ theme: "light" })}
+                      >
+                        라이트 테마 (Light)
+                      </button>
+                    </div>
                   </div>
-                  <div className="setting-options" style={{ marginTop: "8px" }}>
-                    <button
-                      className={`setting-chip${settings.sortOrder === "asc" ? " is-active" : ""}`}
-                      onClick={() => updateSettings({ sortOrder: "asc" })}
-                    >
-                      오름차순 (▲)
-                    </button>
-                    <button
-                      className={`setting-chip${settings.sortOrder === "desc" ? " is-active" : ""}`}
-                      onClick={() => updateSettings({ sortOrder: "desc" })}
-                    >
-                      내림차순 (▼)
-                    </button>
+
+                  <div className="setting-group">
+                    <label className="setting-label">기본 배경색</label>
+                    <div className="setting-options">
+                      <button
+                        className={`setting-chip${settings.defaultBg === "black" ? " is-active" : ""}`}
+                        onClick={() => updateSettings({ defaultBg: "black" })}
+                      >
+                        검정색 (#000)
+                      </button>
+                      <button
+                        className={`setting-chip${settings.defaultBg === "dark" ? " is-active" : ""}`}
+                        onClick={() => updateSettings({ defaultBg: "dark" })}
+                      >
+                        짙은 회색 (#181a20)
+                      </button>
+                      <button
+                        className={`setting-chip${settings.defaultBg === "checker" ? " is-active" : ""}`}
+                        onClick={() => updateSettings({ defaultBg: "checker" })}
+                      >
+                        체크무늬 (투명 확인)
+                      </button>
+                    </div>
                   </div>
-                </div>
-              </div>
 
-              <div className="setting-group">
-                <label className="setting-label">폴더 연속 넘김</label>
-                <div className="setting-checkbox-row">
-                  <label className="checkbox-container">
-                    <input
-                      type="checkbox"
-                      checked={settings.autoNextFolder}
-                      onChange={(e) => updateSettings({ autoNextFolder: e.target.checked })}
-                    />
-                    <span className="checkbox-text">마지막 장에서 다음 폴더로 넘어가기</span>
-                  </label>
-                </div>
-                <p className="setting-hint">
-                  폴더의 마지막 장에서 다음을 누르면 같은 상위 폴더의 다음 폴더로 자동 이동합니다.
-                </p>
-              </div>
+                  <div className="setting-group">
+                    <label className="setting-label">이미지 목록 정렬 (탐색기/뷰어 공유)</label>
+                    <div className="setting-options-row">
+                      <div className="setting-options" style={{ flexWrap: "wrap", gap: "6px" }}>
+                        <button
+                          className={`setting-chip${settings.sortBy === "name" ? " is-active" : ""}`}
+                          onClick={() => updateSettings({ sortBy: "name" })}
+                        >
+                          파일명순 (자연 정렬)
+                        </button>
+                        <button
+                          className={`setting-chip${settings.sortBy === "dateModified" ? " is-active" : ""}`}
+                          onClick={() => updateSettings({ sortBy: "dateModified" })}
+                        >
+                          수정 날짜순
+                        </button>
+                        <button
+                          className={`setting-chip${settings.sortBy === "dateTaken" ? " is-active" : ""}`}
+                          onClick={() => updateSettings({ sortBy: "dateTaken" })}
+                        >
+                          촬영 날짜순 (EXIF)
+                        </button>
+                        <button
+                          className={`setting-chip${settings.sortBy === "fileSize" ? " is-active" : ""}`}
+                          onClick={() => updateSettings({ sortBy: "fileSize" })}
+                        >
+                          파일 크기순
+                        </button>
+                        <button
+                          className={`setting-chip${settings.sortBy === "fileType" ? " is-active" : ""}`}
+                          onClick={() => updateSettings({ sortBy: "fileType" })}
+                        >
+                          파일 형식순
+                        </button>
+                      </div>
+                      <div className="setting-options" style={{ marginTop: "8px" }}>
+                        <button
+                          className={`setting-chip${settings.sortOrder === "asc" ? " is-active" : ""}`}
+                          onClick={() => updateSettings({ sortOrder: "asc" })}
+                        >
+                          오름차순 (▲)
+                        </button>
+                        <button
+                          className={`setting-chip${settings.sortOrder === "desc" ? " is-active" : ""}`}
+                          onClick={() => updateSettings({ sortOrder: "desc" })}
+                        >
+                          내림차순 (▼)
+                        </button>
+                      </div>
+                    </div>
+                  </div>
 
-              <div className="setting-group">
-                <label className="setting-label">화면 인터페이스 표시</label>
-                <div style={{ display: "flex", flexDirection: "column", gap: "8px" }}>
-                  <label className="checkbox-container">
-                    <input
-                      type="checkbox"
-                      checked={settings.showToolbar}
-                      onChange={(e) => updateSettings({ showToolbar: e.target.checked })}
-                    />
-                    <span className="checkbox-text">상단 툴바 표시</span>
-                  </label>
-                  <label className="checkbox-container">
-                    <input
-                      type="checkbox"
-                      checked={settings.showStatusBar}
-                      onChange={(e) => updateSettings({ showStatusBar: e.target.checked })}
-                    />
-                    <span className="checkbox-text">하단 상태 표시줄 표시</span>
-                  </label>
-                </div>
-              </div>
+                  <div className="setting-group">
+                    <label className="setting-label">폴더 연속 넘김</label>
+                    <div className="setting-checkbox-row">
+                      <label className="checkbox-container">
+                        <input
+                          type="checkbox"
+                          checked={settings.autoNextFolder}
+                          onChange={(e) => updateSettings({ autoNextFolder: e.target.checked })}
+                        />
+                        <span className="checkbox-text">마지막 장에서 다음 폴더로 넘어가기</span>
+                      </label>
+                    </div>
+                    <p className="setting-hint">
+                      폴더의 마지막 장에서 다음을 누르면 같은 상위 폴더의 다음 폴더로 자동 이동합니다.
+                    </p>
+                  </div>
+
+                  <div className="setting-group">
+                    <label className="setting-label">화면 인터페이스 표시</label>
+                    <div style={{ display: "flex", flexDirection: "column", gap: "8px" }}>
+                      <label className="checkbox-container">
+                        <input
+                          type="checkbox"
+                          checked={settings.showToolbar}
+                          onChange={(e) => updateSettings({ showToolbar: e.target.checked })}
+                        />
+                        <span className="checkbox-text">상단 툴바 표시</span>
+                      </label>
+                      <label className="checkbox-container">
+                        <input
+                          type="checkbox"
+                          checked={settings.showStatusBar}
+                          onChange={(e) => updateSettings({ showStatusBar: e.target.checked })}
+                        />
+                        <span className="checkbox-text">하단 상태 표시줄 표시</span>
+                      </label>
+                    </div>
+                  </div>
+
+                  {/* 10단계: 외부 편집기 프로그램 관리 */}
+                  <div className="setting-group">
+                    <label className="setting-label">외부 편집기 프로그램 등록</label>
+                    <p className="setting-hint" style={{ marginBottom: "8px" }}>
+                      등록한 편집기는 우클릭 메뉴의 '다음 프로그램으로 편집' 하위 메뉴에 표시됩니다. (기본: 그림판)
+                    </p>
+                    <div className="external-editors-list">
+                      {(!settings.externalEditors || settings.externalEditors.length === 0) ? (
+                        <div className="editor-empty-hint">등록된 추가 편집기가 없습니다.</div>
+                      ) : (
+                        settings.externalEditors.map((ed) => (
+                          <div key={ed.id} className="external-editor-row">
+                            <div className="editor-info">
+                              <span className="editor-name">{ed.name}</span>
+                              <span className="editor-path">{ed.path}</span>
+                            </div>
+                            <button
+                              type="button"
+                              className="editor-del-btn"
+                              onClick={() => handleRemoveExternalEditor(ed.id)}
+                              title="편집기 삭제"
+                            >
+                              ✕
+                            </button>
+                          </div>
+                        ))
+                      )}
+                    </div>
+                    <div className="external-editor-add-form" style={{ marginTop: "10px", display: "flex", gap: "6px" }}>
+                      <input
+                        type="text"
+                        className="modal-input"
+                        placeholder="프로그램 이름 (예: Photoshop)"
+                        value={newEditorName}
+                        onChange={(e) => setNewEditorName(e.target.value)}
+                        style={{ width: "150px" }}
+                      />
+                      <input
+                        type="text"
+                        className="modal-input"
+                        placeholder="실행 파일 경로 (.exe)"
+                        value={newEditorPath}
+                        onChange={(e) => setNewEditorPath(e.target.value)}
+                        style={{ flex: 1 }}
+                      />
+                      <button
+                        type="button"
+                        className="glass-button"
+                        onClick={handleBrowseEditorPath}
+                        style={{ padding: "6px 10px", whiteSpace: "nowrap" }}
+                      >
+                        찾기...
+                      </button>
+                      <button
+                        type="button"
+                        className="glass-button btn-primary"
+                        onClick={handleAddExternalEditor}
+                        style={{ padding: "6px 12px", whiteSpace: "nowrap" }}
+                      >
+                        추가
+                      </button>
+                    </div>
+                  </div>
+                </>
+              ) : (
+                /* 9단계: 보기 설정 탭 */
+                <>
+                  <div className="setting-group">
+                    <label className="setting-label">1. 이미지 확대 방식</label>
+                    <div className="setting-options" style={{ flexDirection: "column", gap: "6px" }}>
+                      <button
+                        className={`setting-chip${settings.zoomMode === "fitIfLarge" ? " is-active" : ""}`}
+                        style={{ textAlign: "left", justifyContent: "flex-start" }}
+                        onClick={() => updateSettings({ zoomMode: "fitIfLarge" })}
+                      >
+                        ① 큰 이미지만 화면에 맞춤, 작은 이미지는 원본 크기 (기본값)
+                      </button>
+                      <button
+                        className={`setting-chip${settings.zoomMode === "fitAlways" ? " is-active" : ""}`}
+                        style={{ textAlign: "left", justifyContent: "flex-start" }}
+                        onClick={() => updateSettings({ zoomMode: "fitAlways" })}
+                      >
+                        ② 항상 화면에 맞춤 (작은 이미지도 화면에 맞춰 확대)
+                      </button>
+                      <button
+                        className={`setting-chip${settings.zoomMode === "originalAlways" ? " is-active" : ""}`}
+                        style={{ textAlign: "left", justifyContent: "flex-start" }}
+                        onClick={() => updateSettings({ zoomMode: "originalAlways" })}
+                      >
+                        ③ 항상 원본 크기 (100%)
+                      </button>
+                      <button
+                        className={`setting-chip${settings.zoomMode === "fitWidth" ? " is-active" : ""}`}
+                        style={{ textAlign: "left", justifyContent: "flex-start" }}
+                        onClick={() => updateSettings({ zoomMode: "fitWidth" })}
+                      >
+                        ④ 너비에 맞춤 (긴 세로 이미지·웹툰용, 위아래 스크롤)
+                      </button>
+                    </div>
+                  </div>
+
+                  <div className="setting-group">
+                    <label className="setting-label">2. 마우스 휠 동작</label>
+                    <div className="setting-options">
+                      <button
+                        className={`setting-chip${settings.wheelAction === "navigate" ? " is-active" : ""}`}
+                        onClick={() => updateSettings({ wheelAction: "navigate" })}
+                      >
+                        이전/다음 이미지 이동 (기본값, 꿀뷰 방식)
+                      </button>
+                      <button
+                        className={`setting-chip${settings.wheelAction === "zoom" ? " is-active" : ""}`}
+                        onClick={() => updateSettings({ wheelAction: "zoom" })}
+                      >
+                        화면 확대/축소
+                      </button>
+                    </div>
+                    <p className="setting-hint">
+                      어느 쪽을 선택하든 <kbd>Ctrl+휠</kbd>은 항상 확대/축소로 작동하며, '너비에 맞춤' 모드에서는 휠이 스크롤로 작동합니다.
+                    </p>
+                  </div>
+
+                  <div className="setting-group">
+                    <label className="setting-label">3. 이미지 전환 시 상태 유지</label>
+                    <div className="setting-checkbox-row">
+                      <label className="checkbox-container">
+                        <input
+                          type="checkbox"
+                          checked={settings.keepTransform}
+                          onChange={(e) => updateSettings({ keepTransform: e.target.checked })}
+                        />
+                        <span className="checkbox-text">다음 이미지로 넘길 때 배율·위치·회전 유지</span>
+                      </label>
+                    </div>
+                    <p className="setting-hint">
+                      기본값은 유지 안 함(새 사진 로드 시 배율 및 위치 초기화)입니다.
+                    </p>
+                  </div>
+
+                  <div className="setting-group">
+                    <label className="setting-label">4. 확대 보간 방식</label>
+                    <div className="setting-options">
+                      <button
+                        className={`setting-chip${settings.interpolation === "smooth" ? " is-active" : ""}`}
+                        onClick={() => updateSettings({ interpolation: "smooth" })}
+                      >
+                        부드럽게 (사진용, 기본값)
+                      </button>
+                      <button
+                        className={`setting-chip${settings.interpolation === "pixelated" ? " is-active" : ""}`}
+                        onClick={() => updateSettings({ interpolation: "pixelated" })}
+                      >
+                        픽셀 그대로 (도트 그림·아이콘용)
+                      </button>
+                    </div>
+                    <p className="setting-hint">
+                      툴바의 그리드 아이콘 버튼으로도 즉시 전환할 수 있습니다.
+                    </p>
+                  </div>
+
+                  <div className="setting-group">
+                    <label className="setting-label">5. 슬라이드쇼 설정</label>
+                    <div style={{ display: "flex", flexDirection: "column", gap: "8px" }}>
+                      <div style={{ display: "flex", alignItems: "center", gap: "8px" }}>
+                        <span style={{ fontSize: "12px", color: "var(--fg-muted)" }}>전환 간격:</span>
+                        <input
+                          type="number"
+                          min={1}
+                          max={60}
+                          value={settings.slideshowInterval}
+                          onChange={(e) => {
+                            const val = Math.max(1, Number(e.target.value) || 3);
+                            updateSettings({ slideshowInterval: val });
+                          }}
+                          style={{
+                            width: "60px",
+                            padding: "4px 8px",
+                            background: "rgba(255, 255, 255, 0.08)",
+                            border: "1px solid var(--border-color)",
+                            borderRadius: "4px",
+                            color: "var(--fg-main)",
+                          }}
+                        />
+                        <span style={{ fontSize: "12px" }}>초</span>
+                      </div>
+                      <label className="checkbox-container">
+                        <input
+                          type="checkbox"
+                          checked={settings.slideshowRandom}
+                          onChange={(e) => updateSettings({ slideshowRandom: e.target.checked })}
+                        />
+                        <span className="checkbox-text">무작위 순서로 재생</span>
+                      </label>
+                      <label className="checkbox-container">
+                        <input
+                          type="checkbox"
+                          checked={settings.slideshowLoop}
+                          onChange={(e) => updateSettings({ slideshowLoop: e.target.checked })}
+                        />
+                        <span className="checkbox-text">끝에 도달하면 처음부터 반복</span>
+                      </label>
+                    </div>
+                  </div>
+                </>
+              )}
             </div>
 
             <div className="modal-buttons">
               <button className="glass-button btn-primary" onClick={() => setShowSettingsModal(false)}>
                 확인 (Esc)
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* 9단계: 다른 이름으로 저장 모달 (Ctrl+Shift+S) */}
+      {showSaveAsModal && (
+        <div
+          className="modal-overlay"
+          role="dialog"
+          aria-modal="true"
+          onClick={(e) => {
+            if (e.target === e.currentTarget) setShowSaveAsModal(false);
+          }}
+        >
+          <div className="modal-box" style={{ maxWidth: "480px" }}>
+            <div className="modal-header">
+              <h3 className="modal-title">다른 이름으로 저장</h3>
+              <button className="modal-close-btn" onClick={() => setShowSaveAsModal(false)} title="닫기 (Esc)">
+                ✕
+              </button>
+            </div>
+
+            <div className="modal-form-content">
+              <div className="form-group">
+                <label className="form-label">저장 파일 경로</label>
+                <div style={{ display: "flex", gap: "6px" }}>
+                  <input
+                    type="text"
+                    className="modal-input"
+                    value={saveAsTargetPath}
+                    onChange={(e) => setSaveAsTargetPath(e.target.value)}
+                    placeholder="저장할 파일 경로"
+                    style={{ flex: 1 }}
+                  />
+                  <button className="glass-button" onClick={handleBrowseSaveTarget} style={{ padding: "6px 12px" }}>
+                    찾아보기...
+                  </button>
+                </div>
+              </div>
+
+              <div className="form-group">
+                <label className="form-label">저장 형식 (포맷)</label>
+                <div className="setting-options">
+                  {(["jpg", "png", "webp", "bmp"] as const).map((fmt) => (
+                    <button
+                      key={fmt}
+                      className={`setting-chip${saveAsFormat === fmt ? " is-active" : ""}`}
+                      onClick={() => {
+                        setSaveAsFormat(fmt);
+                        if (saveAsTargetPath) {
+                          const dotIdx = saveAsTargetPath.lastIndexOf(".");
+                          if (dotIdx !== -1) {
+                            setSaveAsTargetPath(`${saveAsTargetPath.slice(0, dotIdx)}.${fmt}`);
+                          }
+                        }
+                      }}
+                    >
+                      {fmt.toUpperCase()}
+                    </button>
+                  ))}
+                </div>
+              </div>
+
+              {(saveAsFormat === "jpg" || saveAsFormat === "webp") && (
+                <div className="form-group">
+                  <div style={{ display: "flex", justifyContent: "space-between", marginBottom: "4px" }}>
+                    <label className="form-label" style={{ margin: 0 }}>
+                      압축 품질
+                    </label>
+                    <span style={{ fontSize: "12px", color: "var(--accent-color)" }}>{saveAsQuality}%</span>
+                  </div>
+                  <input
+                    type="range"
+                    min={1}
+                    max={100}
+                    value={saveAsQuality}
+                    onChange={(e) => setSaveAsQuality(Number(e.target.value))}
+                    style={{ width: "100%" }}
+                  />
+                </div>
+              )}
+
+              <div className="form-group">
+                <label className="form-label">메타데이터 옵션</label>
+                <div style={{ display: "flex", flexDirection: "column", gap: "6px" }}>
+                  <label className="checkbox-container">
+                    <input
+                      type="checkbox"
+                      checked={saveAsStripMetadata}
+                      onChange={(e) => setSaveAsStripMetadata(e.target.checked)}
+                    />
+                    <span className="checkbox-text">EXIF 메타데이터 제거 (개인정보 보호)</span>
+                  </label>
+                  <label className="checkbox-container">
+                    <input
+                      type="checkbox"
+                      checked={saveAsStripAiPrompt}
+                      onChange={(e) => setSaveAsStripAiPrompt(e.target.checked)}
+                    />
+                    <span className="checkbox-text">AI 생성 프롬프트 / 파라미터 정보 제거</span>
+                  </label>
+                </div>
+              </div>
+
+              {(rotation !== 0 || flipH || flipV || (saveAsResizeW && saveAsResizeW > 0)) && (
+                <div
+                  style={{
+                    padding: "8px 12px",
+                    background: "rgba(59, 130, 246, 0.12)",
+                    border: "1px solid rgba(59, 130, 246, 0.3)",
+                    borderRadius: "6px",
+                    fontSize: "12px",
+                    lineHeight: "1.4",
+                    color: "var(--fg-main)",
+                  }}
+                >
+                  <strong>적용된 변환 사항:</strong>
+                  <ul style={{ margin: "4px 0 0 16px", padding: 0 }}>
+                    {rotation !== 0 && <li>회전: {rotation}°</li>}
+                    {flipH && <li>좌우 반전</li>}
+                    {flipV && <li>상하 반전</li>}
+                    {saveAsResizeW && saveAsResizeH && (
+                      <li>크기 조정: {saveAsResizeW} × {saveAsResizeH} (Lanczos3 필터)</li>
+                    )}
+                  </ul>
+                  <span style={{ color: "var(--fg-dim)", fontSize: "11px" }}>
+                    * 원본 파일은 그대로 유지되며 사본으로 저장됩니다.
+                  </span>
+                </div>
+              )}
+            </div>
+
+            <div className="modal-buttons" style={{ marginTop: "16px" }}>
+              <button className="glass-button" onClick={() => setShowSaveAsModal(false)}>
+                취소 (Esc)
+              </button>
+              <button className="glass-button btn-primary" onClick={executeSaveAs}>
+                저장하기 (Enter)
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* 9단계: 크기 조정 모달 (Ctrl+R) */}
+      {showResizeModal && (
+        <div
+          className="modal-overlay"
+          role="dialog"
+          aria-modal="true"
+          onClick={(e) => {
+            if (e.target === e.currentTarget) setShowResizeModal(false);
+          }}
+        >
+          <div className="modal-box" style={{ maxWidth: "420px" }}>
+            <div className="modal-header">
+              <h3 className="modal-title">이미지 크기 조정</h3>
+              <button className="modal-close-btn" onClick={() => setShowResizeModal(false)} title="닫기 (Esc)">
+                ✕
+              </button>
+            </div>
+
+            <div className="modal-form-content">
+              {meta && (
+                <p style={{ fontSize: "12px", color: "var(--fg-muted)", marginBottom: "12px" }}>
+                  현재 크기: <strong>{meta.naturalWidth} × {meta.naturalHeight}</strong> px
+                </p>
+              )}
+
+              <div className="form-group">
+                <label className="form-label">단위 선택</label>
+                <div className="setting-options">
+                  <button
+                    className={`setting-chip${resizeUnit === "pixel" ? " is-active" : ""}`}
+                    onClick={() => setResizeUnit("pixel")}
+                  >
+                    픽셀 (px)
+                  </button>
+                  <button
+                    className={`setting-chip${resizeUnit === "percent" ? " is-active" : ""}`}
+                    onClick={() => setResizeUnit("percent")}
+                  >
+                    비율 (%)
+                  </button>
+                </div>
+              </div>
+
+              <div style={{ display: "flex", gap: "12px", alignItems: "center" }}>
+                <div style={{ flex: 1 }}>
+                  <label className="form-label">너비 ({resizeUnit === "pixel" ? "px" : "%"})</label>
+                  <input
+                    type="number"
+                    className="modal-input"
+                    value={resizeUnit === "pixel" ? resizeCustomW : meta ? Math.round((resizeCustomW / meta.naturalWidth) * 100) : 100}
+                    onChange={(e) => {
+                      const val = Number(e.target.value) || 0;
+                      if (resizeUnit === "pixel") {
+                        setResizeCustomW(val);
+                        if (resizeKeepRatio && meta && meta.naturalWidth > 0) {
+                          setResizeCustomH(Math.round(val * (meta.naturalHeight / meta.naturalWidth)));
+                        }
+                      } else {
+                        if (meta) {
+                          const px = Math.round(meta.naturalWidth * (val / 100));
+                          setResizeCustomW(px);
+                          if (resizeKeepRatio) {
+                            setResizeCustomH(Math.round(meta.naturalHeight * (val / 100)));
+                          }
+                        }
+                      }
+                    }}
+                  />
+                </div>
+                <div style={{ flex: 1 }}>
+                  <label className="form-label">높이 ({resizeUnit === "pixel" ? "px" : "%"})</label>
+                  <input
+                    type="number"
+                    className="modal-input"
+                    value={resizeUnit === "pixel" ? resizeCustomH : meta ? Math.round((resizeCustomH / meta.naturalHeight) * 100) : 100}
+                    onChange={(e) => {
+                      const val = Number(e.target.value) || 0;
+                      if (resizeUnit === "pixel") {
+                        setResizeCustomH(val);
+                        if (resizeKeepRatio && meta && meta.naturalHeight > 0) {
+                          setResizeCustomW(Math.round(val * (meta.naturalWidth / meta.naturalHeight)));
+                        }
+                      } else {
+                        if (meta) {
+                          const px = Math.round(meta.naturalHeight * (val / 100));
+                          setResizeCustomH(px);
+                          if (resizeKeepRatio) {
+                            setResizeCustomW(Math.round(meta.naturalWidth * (val / 100)));
+                          }
+                        }
+                      }
+                    }}
+                  />
+                </div>
+              </div>
+
+              <div style={{ marginTop: "10px" }}>
+                <label className="checkbox-container">
+                  <input
+                    type="checkbox"
+                    checked={resizeKeepRatio}
+                    onChange={(e) => setResizeKeepRatio(e.target.checked)}
+                  />
+                  <span className="checkbox-text">가로세로 비율 유지</span>
+                </label>
+              </div>
+
+              <div className="form-group" style={{ marginTop: "14px" }}>
+                <label className="form-label">자주 쓰는 크기</label>
+                <div style={{ display: "flex", flexWrap: "wrap", gap: "6px" }}>
+                  <button
+                    className="setting-chip"
+                    onClick={() => {
+                      if (!meta) return;
+                      const w = 1920;
+                      const h = resizeKeepRatio ? Math.round(w * (meta.naturalHeight / meta.naturalWidth)) : meta.naturalHeight;
+                      setResizeCustomW(w);
+                      setResizeCustomH(h);
+                      setResizeUnit("pixel");
+                    }}
+                  >
+                    1920 (FHD)
+                  </button>
+                  <button
+                    className="setting-chip"
+                    onClick={() => {
+                      if (!meta) return;
+                      const w = 1280;
+                      const h = resizeKeepRatio ? Math.round(w * (meta.naturalHeight / meta.naturalWidth)) : meta.naturalHeight;
+                      setResizeCustomW(w);
+                      setResizeCustomH(h);
+                      setResizeUnit("pixel");
+                    }}
+                  >
+                    1280 (HD)
+                  </button>
+                  <button
+                    className="setting-chip"
+                    onClick={() => {
+                      if (!meta) return;
+                      const w = 800;
+                      const h = resizeKeepRatio ? Math.round(w * (meta.naturalHeight / meta.naturalWidth)) : meta.naturalHeight;
+                      setResizeCustomW(w);
+                      setResizeCustomH(h);
+                      setResizeUnit("pixel");
+                    }}
+                  >
+                    800
+                  </button>
+                  <button
+                    className="setting-chip"
+                    onClick={() => {
+                      if (!meta) return;
+                      setResizeCustomW(Math.round(meta.naturalWidth * 0.5));
+                      setResizeCustomH(Math.round(meta.naturalHeight * 0.5));
+                      setResizeUnit("pixel");
+                    }}
+                  >
+                    50%
+                  </button>
+                </div>
+              </div>
+            </div>
+
+            <div className="modal-buttons" style={{ marginTop: "16px" }}>
+              <button className="glass-button" onClick={() => setShowResizeModal(false)}>
+                취소 (Esc)
+              </button>
+              <button
+                className="glass-button btn-primary"
+                onClick={() => {
+                  setShowResizeModal(false);
+                  openSaveAsModal(resizeCustomW, resizeCustomH);
+                }}
+              >
+                다음: 저장하기 (Enter)
               </button>
             </div>
           </div>
@@ -2907,6 +5015,190 @@ function App() {
         </div>
       )}
 
+      {/* 10단계: 이름 바꾸기 모달 (F2) */}
+      {showRenameModal && renameTargetItem && (
+        <div
+          className="modal-overlay"
+          role="dialog"
+          aria-modal="true"
+          onClick={(e) => {
+            if (e.target === e.currentTarget) setShowRenameModal(false);
+          }}
+        >
+          <div className="modal-box" style={{ maxWidth: "420px" }}>
+            <div className="modal-header">
+              <h3 className="modal-title">
+                {renameTargetItem.isDir ? "폴더 이름 바꾸기" : "파일 이름 바꾸기"}
+              </h3>
+              <button
+                className="modal-close-btn"
+                onClick={() => setShowRenameModal(false)}
+                title="닫기 (Esc)"
+              >
+                ✕
+              </button>
+            </div>
+
+            <div className="modal-form-content">
+              <div className="form-group">
+                <label className="form-label">현재 이름</label>
+                <div className="modal-current-name-display">{renameTargetItem.oldName}</div>
+              </div>
+
+              <div className="form-group">
+                <label className="form-label">새 이름</label>
+                <input
+                  ref={renameInputRef}
+                  type="text"
+                  className={`modal-input${renameError ? " is-error" : ""}`}
+                  value={renameNewName}
+                  onChange={(e) => {
+                    setRenameNewName(e.target.value);
+                    setRenameError(validateFileName(e.target.value));
+                  }}
+                  placeholder="새 이름을 입력하세요"
+                />
+                {renameError && <div className="modal-error-text">{renameError}</div>}
+              </div>
+            </div>
+
+            <div className="modal-buttons">
+              <button
+                type="button"
+                className="glass-button"
+                onClick={() => setShowRenameModal(false)}
+              >
+                취소 (Esc)
+              </button>
+              <button
+                type="button"
+                className="glass-button btn-primary"
+                onClick={() => void executeRename()}
+                disabled={Boolean(renameError) || !renameNewName.trim()}
+              >
+                변경 (Enter)
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* 10단계: 폴더로 복사(F7) / 폴더로 이동(F8) 모달 */}
+      {showCopyMoveModal && (
+        <div
+          className="modal-overlay"
+          role="dialog"
+          aria-modal="true"
+          onClick={(e) => {
+            if (e.target === e.currentTarget) setShowCopyMoveModal(false);
+          }}
+        >
+          <div className="modal-box" style={{ maxWidth: "480px" }}>
+            <div className="modal-header">
+              <h3 className="modal-title">
+                {copyMoveMode === "copy" ? "폴더로 복사" : "폴더로 이동"} ({copyMoveSourcePaths.length}개 항목)
+              </h3>
+              <button
+                className="modal-close-btn"
+                onClick={() => setShowCopyMoveModal(false)}
+                title="닫기 (Esc)"
+              >
+                ✕
+              </button>
+            </div>
+
+            <div className="modal-form-content">
+              <div className="form-group">
+                <label className="form-label">대상 폴더</label>
+                <div style={{ display: "flex", gap: "6px" }}>
+                  <input
+                    type="text"
+                    className="modal-input"
+                    value={copyMoveTargetFolder}
+                    onChange={(e) => setCopyMoveTargetFolder(e.target.value)}
+                    placeholder="대상 폴더 경로"
+                    style={{ flex: 1 }}
+                  />
+                  <button
+                    type="button"
+                    className="glass-button"
+                    onClick={handleBrowseCopyMoveTarget}
+                    style={{ padding: "6px 12px", whiteSpace: "nowrap" }}
+                  >
+                    찾아보기...
+                  </button>
+                </div>
+              </div>
+
+              {/* 최근 사용한 대상 폴더 5개 빠른 선택 칩 */}
+              {settings.recentTargetFolders && settings.recentTargetFolders.length > 0 && (
+                <div className="form-group">
+                  <label className="form-label">최근 사용한 대상 폴더</label>
+                  <div className="setting-options" style={{ flexWrap: "wrap", gap: "6px" }}>
+                    {settings.recentTargetFolders.slice(0, 5).map((folder) => (
+                      <button
+                        key={folder}
+                        type="button"
+                        className={`setting-chip${copyMoveTargetFolder === folder ? " is-active" : ""}`}
+                        onClick={() => setCopyMoveTargetFolder(folder)}
+                        title={folder}
+                      >
+                        {baseName(folder)}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+              )}
+
+              <div className="form-group">
+                <label className="form-label">이름이 같은 파일이 있을 때</label>
+                <div className="setting-options">
+                  <button
+                    type="button"
+                    className={`setting-chip${copyMoveConflict === "rename" ? " is-active" : ""}`}
+                    onClick={() => setCopyMoveConflict("rename")}
+                  >
+                    번호 붙여 저장
+                  </button>
+                  <button
+                    type="button"
+                    className={`setting-chip${copyMoveConflict === "overwrite" ? " is-active" : ""}`}
+                    onClick={() => setCopyMoveConflict("overwrite")}
+                  >
+                    덮어쓰기
+                  </button>
+                  <button
+                    type="button"
+                    className={`setting-chip${copyMoveConflict === "skip" ? " is-active" : ""}`}
+                    onClick={() => setCopyMoveConflict("skip")}
+                  >
+                    건너뛰기
+                  </button>
+                </div>
+              </div>
+            </div>
+
+            <div className="modal-buttons">
+              <button
+                type="button"
+                className="glass-button"
+                onClick={() => setShowCopyMoveModal(false)}
+              >
+                취소 (Esc)
+              </button>
+              <button
+                type="button"
+                className="glass-button btn-primary"
+                onClick={() => void executeCopyMove()}
+                disabled={!copyMoveTargetFolder.trim()}
+              >
+                {copyMoveMode === "copy" ? "복사 시작" : "이동 시작"} (Enter)
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
       {/* 7단계: 우클릭 컨텍스트 메뉴 */}
       {contextMenu && (
         <div
@@ -2922,6 +5214,95 @@ function App() {
               {group.map((cmdId) => {
                 const cmd = commandMap.get(cmdId);
                 if (!cmd) return null;
+
+                // 10단계: 바탕화면 배경으로 설정 하위 메뉴
+                if (cmd.id === "setWallpaper") {
+                  return (
+                    <div key={cmd.id} className="context-menu-submenu-wrapper">
+                      <div className={`context-menu-item context-menu-has-submenu${!cmd.isEnabled ? " is-disabled" : ""}`}>
+                        <span className="context-menu-icon">{cmd.icon}</span>
+                        <span className="context-menu-label">{cmd.label}</span>
+                        <ChevronRightIcon size={13} style={{ marginLeft: "auto", opacity: 0.6 }} />
+                      </div>
+                      {cmd.isEnabled && (
+                        <div className="context-submenu glass-panel">
+                          <button
+                            type="button"
+                            className="context-menu-item"
+                            onClick={() => {
+                              setContextMenu(null);
+                              void handleSetWallpaper("fill");
+                            }}
+                          >
+                            <span className="context-menu-label">채우기 (기본)</span>
+                          </button>
+                          <button
+                            type="button"
+                            className="context-menu-item"
+                            onClick={() => {
+                              setContextMenu(null);
+                              void handleSetWallpaper("fit");
+                            }}
+                          >
+                            <span className="context-menu-label">맞춤</span>
+                          </button>
+                          <button
+                            type="button"
+                            className="context-menu-item"
+                            onClick={() => {
+                              setContextMenu(null);
+                              void handleSetWallpaper("center");
+                            }}
+                          >
+                            <span className="context-menu-label">가운데</span>
+                          </button>
+                        </div>
+                      )}
+                    </div>
+                  );
+                }
+
+                // 10단계: 외부 편집기 하위 메뉴
+                if (cmd.id === "openExternalEditor") {
+                  return (
+                    <div key={cmd.id} className="context-menu-submenu-wrapper">
+                      <div className={`context-menu-item context-menu-has-submenu${!cmd.isEnabled ? " is-disabled" : ""}`}>
+                        <span className="context-menu-icon">{cmd.icon}</span>
+                        <span className="context-menu-label">다음 프로그램으로 편집</span>
+                        <ChevronRightIcon size={13} style={{ marginLeft: "auto", opacity: 0.6 }} />
+                      </div>
+                      {cmd.isEnabled && (
+                        <div className="context-submenu glass-panel">
+                          <button
+                            type="button"
+                            className="context-menu-item"
+                            onClick={() => {
+                              setContextMenu(null);
+                              void handleOpenExternalEditor();
+                            }}
+                          >
+                            <span className="context-menu-label">그림판 (기본)</span>
+                            <span className="context-menu-shortcut">Ctrl+E</span>
+                          </button>
+                          {(settings.externalEditors || []).map((ed) => (
+                            <button
+                              key={ed.id}
+                              type="button"
+                              className="context-menu-item"
+                              onClick={() => {
+                                setContextMenu(null);
+                                void handleOpenExternalEditor(ed.path);
+                              }}
+                            >
+                              <span className="context-menu-label">{ed.name}</span>
+                            </button>
+                          ))}
+                        </div>
+                      )}
+                    </div>
+                  );
+                }
+
                 return (
                   <button
                     key={cmd.id}

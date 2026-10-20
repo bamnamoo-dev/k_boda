@@ -10,6 +10,16 @@ use std::time::UNIX_EPOCH;
 use serde::{Deserialize, Serialize};
 use tauri::{Emitter, Manager};
 use notify::{Config, Event, EventKind, RecommendedWatcher, RecursiveMode, Watcher};
+use windows_sys::Win32::Foundation::POINT;
+use windows_sys::Win32::System::DataExchange::{
+    CloseClipboard, EmptyClipboard, GetClipboardData, IsClipboardFormatAvailable, OpenClipboard,
+    SetClipboardData,
+};
+use windows_sys::Win32::System::Memory::{GlobalAlloc, GlobalLock, GlobalUnlock, GMEM_MOVEABLE};
+use windows_sys::Win32::UI::Shell::DROPFILES;
+use windows_sys::Win32::UI::WindowsAndMessaging::{
+    SystemParametersInfoW, SPIF_SENDCHANGE, SPIF_UPDATEINIFILE, SPI_SETDESKWALLPAPER,
+};
 
 /// WebView2가 직접 표시할 수 있는 이미지 확장자 (Rust에서 디코딩하지 않는다)
 const IMAGE_EXTENSIONS: &[&str] = &[
@@ -25,7 +35,9 @@ const TARGET_CACHE_SIZE_BYTES: u64 = 400 * 1024 * 1024;
 pub enum SortBy {
     Name,
     DateModified,
+    DateTaken,
     FileSize,
+    FileType,
 }
 
 #[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
@@ -124,12 +136,51 @@ fn compare_natural(a: &str, b: &str) -> Ordering {
     key_a.cmp(&key_b).then_with(|| a.cmp(b))
 }
 
+fn get_exif_date_taken(path: &str) -> Option<String> {
+    let p = Path::new(path);
+    if let Ok(file) = File::open(p) {
+        let mut bufreader = BufReader::new(file);
+        let exifreader = exif::Reader::new();
+        if let Ok(exif_data) = exifreader.read_from_container(&mut bufreader) {
+            for f in exif_data.fields() {
+                if f.tag == exif::Tag::DateTimeOriginal {
+                    return Some(f.display_value().to_string().trim_matches('"').to_string());
+                }
+            }
+        }
+    }
+    None
+}
+
 fn sort_entries(items: &mut [ImageEntry], sort_by: SortBy, sort_order: SortOrder) {
     items.sort_by(|a, b| {
         let ord = match sort_by {
             SortBy::Name => compare_natural(&a.file_name, &b.file_name),
             SortBy::DateModified => a.modified.cmp(&b.modified),
+            SortBy::DateTaken => {
+                let dt_a = get_exif_date_taken(&a.path);
+                let dt_b = get_exif_date_taken(&b.path);
+                match (dt_a, dt_b) {
+                    (Some(da), Some(db)) => da.cmp(&db),
+                    (Some(_), None) => Ordering::Less,
+                    (None, Some(_)) => Ordering::Greater,
+                    (None, None) => a.modified.cmp(&b.modified),
+                }
+            }
             SortBy::FileSize => a.file_size.cmp(&b.file_size),
+            SortBy::FileType => {
+                let ext_a = Path::new(&a.file_name)
+                    .extension()
+                    .and_then(|e| e.to_str())
+                    .unwrap_or("")
+                    .to_lowercase();
+                let ext_b = Path::new(&b.file_name)
+                    .extension()
+                    .and_then(|e| e.to_str())
+                    .unwrap_or("")
+                    .to_lowercase();
+                ext_a.cmp(&ext_b).then_with(|| compare_natural(&a.file_name, &b.file_name))
+            }
         };
         match sort_order {
             SortOrder::Asc => ord,
@@ -525,28 +576,40 @@ fn show_in_folder(path: String) -> Result<(), String> {
     Ok(())
 }
 
-/// 파일 삭제 (반드시 휴지통으로 이동, 영구 삭제 금지)
+/// 파일 삭제 (실행 취소(Ctrl+Z)를 위해 스테이징 후 최대 20단계 스택 관리, 스택 초과시 휴지통으로 이동)
 #[tauri::command]
-fn delete_to_trash(path: String) -> Result<(), String> {
-    let p = Path::new(&path);
-    trash::delete(p).map_err(|e| format!("휴지통으로 이동하지 못했습니다: {e}"))?;
-    Ok(())
+fn delete_to_trash(path: String, undo_state: tauri::State<UndoState>) -> Result<(), String> {
+    delete_paths_to_trash(vec![path], undo_state)
 }
 
-/// 회전된 이미지 사본 저장 (원본 절대 덮어쓰지 않음)
+/// 회전 및 반전된 이미지 사본 저장 (원본 절대 덮어쓰지 않음)
 #[tauri::command]
-fn save_rotated_image(source_path: String, rotation: u32) -> Result<String, String> {
+fn save_rotated_image(
+    source_path: String,
+    rotation: u32,
+    flip_h: Option<bool>,
+    flip_v: Option<bool>,
+) -> Result<String, String> {
     let src = Path::new(&source_path);
     let parent = src.parent().unwrap_or_else(|| Path::new(""));
     let stem = src.file_stem().and_then(|s| s.to_str()).unwrap_or("image");
     let ext = src.extension().and_then(|s| s.to_str()).unwrap_or("jpg");
 
+    let is_flipped = flip_h.unwrap_or(false) || flip_v.unwrap_or(false);
+    let suffix = if rotation % 360 != 0 && is_flipped {
+        "modified"
+    } else if is_flipped {
+        "flipped"
+    } else {
+        "rotated"
+    };
+
     let mut counter = 0;
     let target_path = loop {
         let file_name = if counter == 0 {
-            format!("{}_rotated.{}", stem, ext)
+            format!("{}_{}.{}", stem, suffix, ext)
         } else {
-            format!("{}_rotated_{}.{}", stem, counter, ext)
+            format!("{}_{}_{}.{}", stem, suffix, counter, ext)
         };
         let p = parent.join(&file_name);
         if !p.exists() {
@@ -556,18 +619,100 @@ fn save_rotated_image(source_path: String, rotation: u32) -> Result<String, Stri
     };
 
     let img = image::open(src).map_err(|e| format!("이미지를 열 수 없습니다: {e}"))?;
-    let rotated = match rotation % 360 {
+    let mut processed = match rotation % 360 {
+        90 => img.rotate90(),
+        180 => img.rotate180(),
+        270 => img.rotate270(),
+        _ => img,
+    };
+    if flip_h.unwrap_or(false) {
+        processed = processed.fliph();
+    }
+    if flip_v.unwrap_or(false) {
+        processed = processed.flipv();
+    }
+
+    processed
+        .save(&target_path)
+        .map_err(|e| format!("사본 저장에 실패했습니다: {e}"))?;
+
+    Ok(target_path.to_string_lossy().into_owned())
+}
+
+/// 9단계: 다른 이름으로 저장 (크기 조정 Lanczos3, 회전, 좌우/상하 반전, 품질, 포맷 변환, 메타데이터 제거)
+#[tauri::command]
+fn save_image_advanced(
+    source_path: String,
+    target_path: String,
+    format: String,
+    quality: u8,
+    rotation: u32,
+    flip_h: bool,
+    flip_v: bool,
+    _strip_metadata: bool,
+    _strip_ai_prompt: bool,
+    resize_width: Option<u32>,
+    resize_height: Option<u32>,
+) -> Result<String, String> {
+    let src = Path::new(&source_path);
+    let target = Path::new(&target_path);
+
+    let mut img = image::open(src).map_err(|e| format!("이미지를 열 수 없습니다: {e}"))?;
+
+    // 1. 크기 조정 (고품질 Lanczos3 필터)
+    if let (Some(w), Some(h)) = (resize_width, resize_height) {
+        if w > 0 && h > 0 && (w != img.width() || h != img.height()) {
+            img = img.resize_exact(w, h, image::imageops::FilterType::Lanczos3);
+        }
+    }
+
+    // 2. 화면에 적용된 회전 반영
+    img = match rotation % 360 {
         90 => img.rotate90(),
         180 => img.rotate180(),
         270 => img.rotate270(),
         _ => img,
     };
 
-    rotated
-        .save(&target_path)
-        .map_err(|e| format!("사본 저장에 실패했습니다: {e}"))?;
+    // 3. 화면에 적용된 반전 반영
+    if flip_h {
+        img = img.fliph();
+    }
+    if flip_v {
+        img = img.flipv();
+    }
 
-    Ok(target_path.to_string_lossy().into_owned())
+    // 4. 저장 포맷 및 인코딩
+    let fmt_str = format.to_lowercase();
+    let parent = target.parent().unwrap_or_else(|| Path::new(""));
+    let _ = std::fs::create_dir_all(parent);
+
+    let file = File::create(target).map_err(|e| format!("대상 파일을 생성할 수 없습니다: {e}"))?;
+    let mut writer = std::io::BufWriter::new(file);
+
+    match fmt_str.as_str() {
+        "jpg" | "jpeg" => {
+            let mut encoder = image::codecs::jpeg::JpegEncoder::new_with_quality(&mut writer, quality.clamp(1, 100));
+            encoder.encode_image(&img).map_err(|e| format!("JPEG 인코딩 실패: {e}"))?;
+        }
+        "png" => {
+            img.write_to(&mut writer, image::ImageFormat::Png)
+                .map_err(|e| format!("PNG 저장 실패: {e}"))?;
+        }
+        "webp" => {
+            img.write_to(&mut writer, image::ImageFormat::WebP)
+                .map_err(|e| format!("WebP 저장 실패: {e}"))?;
+        }
+        "bmp" => {
+            img.write_to(&mut writer, image::ImageFormat::Bmp)
+                .map_err(|e| format!("BMP 저장 실패: {e}"))?;
+        }
+        _ => {
+            return Err(format!("지원하지 않는 저장 형식입니다: {fmt_str}"));
+        }
+    }
+
+    Ok(target.to_string_lossy().into_owned())
 }
 
 /// ZIP/CBZ 압축 파일 내부의 특정 엔트리를 zip_temp에 온디맨드로 추출하여 파일 경로 반환
@@ -830,6 +975,46 @@ fn default_thumbnail_size() -> u32 {
     120
 }
 
+fn default_false() -> bool {
+    false
+}
+
+fn default_zoom_mode() -> String {
+    "fitIfLarge".to_string()
+}
+
+fn default_wheel_action() -> String {
+    "navigate".to_string()
+}
+
+fn default_interpolation() -> String {
+    "smooth".to_string()
+}
+
+fn default_slideshow_interval() -> u32 {
+    3
+}
+
+fn default_filter() -> String {
+    "all".to_string()
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
+#[serde(rename_all = "camelCase")]
+pub struct RecentItemEntry {
+    pub path: String,
+    pub name: String,
+    pub is_folder: bool,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
+#[serde(rename_all = "camelCase")]
+pub struct ExternalEditorEntry {
+    pub id: String,
+    pub name: String,
+    pub path: String,
+}
+
 #[derive(Serialize, Deserialize, Clone, Debug)]
 #[serde(rename_all = "camelCase")]
 pub struct AppSettings {
@@ -847,6 +1032,30 @@ pub struct AppSettings {
     pub folder_tree_width: u32,
     #[serde(default = "default_thumbnail_size")]
     pub thumbnail_size: u32,
+    #[serde(default = "default_zoom_mode")]
+    pub zoom_mode: String,
+    #[serde(default = "default_wheel_action")]
+    pub wheel_action: String,
+    #[serde(default = "default_false")]
+    pub keep_transform: bool,
+    #[serde(default = "default_interpolation")]
+    pub interpolation: String,
+    #[serde(default = "default_slideshow_interval")]
+    pub slideshow_interval: u32,
+    #[serde(default = "default_false")]
+    pub slideshow_random: bool,
+    #[serde(default = "default_true")]
+    pub slideshow_loop: bool,
+    #[serde(default)]
+    pub recent_items: Vec<RecentItemEntry>,
+    #[serde(default)]
+    pub favorite_folders: Vec<String>,
+    #[serde(default)]
+    pub recent_target_folders: Vec<String>,
+    #[serde(default)]
+    pub external_editors: Vec<ExternalEditorEntry>,
+    #[serde(default = "default_filter")]
+    pub explorer_filter: String,
 }
 
 impl Default for AppSettings {
@@ -862,6 +1071,18 @@ impl Default for AppSettings {
             last_folder: None,
             folder_tree_width: 240,
             thumbnail_size: 120,
+            zoom_mode: "fitIfLarge".to_string(),
+            wheel_action: "navigate".to_string(),
+            keep_transform: false,
+            interpolation: "smooth".to_string(),
+            slideshow_interval: 3,
+            slideshow_random: false,
+            slideshow_loop: true,
+            recent_items: Vec::new(),
+            favorite_folders: Vec::new(),
+            recent_target_folders: Vec::new(),
+            external_editors: Vec::new(),
+            explorer_filter: "all".to_string(),
         }
     }
 }
@@ -1022,6 +1243,107 @@ fn get_prev_folder_last_image(current_path: String) -> Result<Option<String>, St
         }
     }
     Ok(None)
+}
+
+#[derive(Clone, Serialize, Deserialize, Debug)]
+#[serde(tag = "type", content = "data")]
+pub enum UndoAction {
+    Delete {
+        items: Vec<(String, String)>,
+    },
+    Rename {
+        old_path: String,
+        new_path: String,
+    },
+    Move {
+        items: Vec<(String, String)>,
+    },
+}
+
+pub struct UndoState(pub Mutex<Vec<UndoAction>>);
+
+fn get_undo_staging_dir() -> PathBuf {
+    let dir = std::env::var("LOCALAPPDATA")
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| std::env::temp_dir())
+        .join("PrismView")
+        .join("undo_trash");
+    let _ = std::fs::create_dir_all(&dir);
+    dir
+}
+
+fn copy_entry_recursive(src: &Path, dst: &Path) -> std::io::Result<()> {
+    if src.is_dir() {
+        std::fs::create_dir_all(dst)?;
+        for entry in std::fs::read_dir(src)? {
+            let entry = entry?;
+            let entry_dst = dst.join(entry.file_name());
+            copy_entry_recursive(&entry.path(), &entry_dst)?;
+        }
+    } else {
+        if let Some(parent) = dst.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        std::fs::copy(src, dst)?;
+    }
+    Ok(())
+}
+
+fn get_unique_target_path(target_folder: &Path, file_name: &str) -> PathBuf {
+    let p = target_folder.join(file_name);
+    if !p.exists() {
+        return p;
+    }
+    let p_path = Path::new(file_name);
+    let stem = p_path.file_stem().and_then(|s| s.to_str()).unwrap_or("file");
+    let ext = p_path.extension().and_then(|s| s.to_str());
+
+    let mut counter = 2;
+    loop {
+        let new_name = match ext {
+            Some(e) => format!("{} ({}).{}", stem, counter, e),
+            None => format!("{} ({})", stem, counter),
+        };
+        let candidate = target_folder.join(&new_name);
+        if !candidate.exists() {
+            return candidate;
+        }
+        counter += 1;
+    }
+}
+
+fn is_windows_reserved_name(name: &str) -> bool {
+    let stem = Path::new(name)
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or(name)
+        .trim();
+    let upper = stem.to_uppercase();
+    const RESERVED: &[&str] = &[
+        "CON", "PRN", "AUX", "NUL", "COM1", "COM2", "COM3", "COM4", "COM5", "COM6", "COM7",
+        "COM8", "COM9", "LPT1", "LPT2", "LPT3", "LPT4", "LPT5", "LPT6", "LPT7", "LPT8", "LPT9",
+    ];
+    RESERVED.contains(&upper.as_str())
+}
+
+fn validate_windows_filename(name: &str) -> Result<(), String> {
+    let trimmed = name.trim();
+    if trimmed.is_empty() {
+        return Err("파일 이름을 입력해 주세요.".to_string());
+    }
+    const FORBIDDEN_CHARS: &[char] = &['\\', '/', ':', '*', '?', '"', '<', '>', '|'];
+    for c in trimmed.chars() {
+        if FORBIDDEN_CHARS.contains(&c) {
+            return Err("파일 이름에 다음 문자를 포함할 수 없습니다: \\ / : * ? \" < > |".to_string());
+        }
+    }
+    if trimmed.ends_with('.') || trimmed.ends_with(' ') {
+        return Err("파일 이름은 마침표(.)나 공백으로 끝날 수 없습니다.".to_string());
+    }
+    if is_windows_reserved_name(trimmed) {
+        return Err(format!("Windows에서 예약된 파일 이름입니다: {}", trimmed));
+    }
+    Ok(())
 }
 
 pub struct FolderWatcherState(pub Mutex<Option<(RecommendedWatcher, String)>>);
@@ -1266,7 +1588,18 @@ fn scan_explorer_folder(
             let cmp = match sort_by {
                 SortBy::Name => natural_sort_key(&a.name).cmp(&natural_sort_key(&b.name)),
                 SortBy::DateModified => a.modified.cmp(&b.modified).then_with(|| natural_sort_key(&a.name).cmp(&natural_sort_key(&b.name))),
+                SortBy::DateTaken => {
+                    let dt_a = get_exif_date_taken(&a.path);
+                    let dt_b = get_exif_date_taken(&b.path);
+                    match (dt_a, dt_b) {
+                        (Some(da), Some(db)) => da.cmp(&db),
+                        (Some(_), None) => Ordering::Less,
+                        (None, Some(_)) => Ordering::Greater,
+                        (None, None) => a.modified.cmp(&b.modified),
+                    }
+                }
                 SortBy::FileSize => a.size.cmp(&b.size).then_with(|| natural_sort_key(&a.name).cmp(&natural_sort_key(&b.name))),
+                SortBy::FileType => a.extension.cmp(&b.extension).then_with(|| natural_sort_key(&a.name).cmp(&natural_sort_key(&b.name))),
             };
             if sort_order == SortOrder::Desc {
                 cmp.reverse()
@@ -1293,14 +1626,585 @@ fn scan_explorer_folder(
 }
 
 #[tauri::command]
-fn delete_paths_to_trash(paths: Vec<String>) -> Result<(), String> {
-    for path_str in paths {
+fn delete_paths_to_trash(
+    paths: Vec<String>,
+    undo_state: tauri::State<UndoState>,
+) -> Result<(), String> {
+    let staging_root = get_undo_staging_dir();
+    let batch_id = std::time::SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_millis())
+        .unwrap_or(0);
+    let batch_dir = staging_root.join(format!("batch_{}", batch_id));
+    let _ = std::fs::create_dir_all(&batch_dir);
+
+    let mut staged_items = Vec::new();
+
+    for (idx, path_str) in paths.into_iter().enumerate() {
         let p = Path::new(&path_str);
-        if p.exists() {
-            trash::delete(p).map_err(|e| format!("휴지통 이동 실패: {}", e))?;
+        if !p.exists() {
+            continue;
+        }
+        let file_name = p.file_name().and_then(|n| n.to_str()).unwrap_or("item");
+        let staged_target = batch_dir.join(format!("{}_{}", idx, file_name));
+
+        let staged = if std::fs::rename(p, &staged_target).is_ok() {
+            true
+        } else if copy_entry_recursive(p, &staged_target).is_ok() {
+            if p.is_dir() {
+                let _ = trash::delete(p);
+            } else {
+                let _ = std::fs::remove_file(p);
+            }
+            true
+        } else {
+            false
+        };
+
+        if staged {
+            staged_items.push((path_str, staged_target.to_string_lossy().into_owned()));
         }
     }
+
+    if !staged_items.is_empty() {
+        let mut stack = undo_state.0.lock().map_err(|e| e.to_string())?;
+        stack.push(UndoAction::Delete { items: staged_items });
+        while stack.len() > 20 {
+            let evicted = stack.remove(0);
+            if let UndoAction::Delete { items } = evicted {
+                for (_, staged_p) in items {
+                    let sp = Path::new(&staged_p);
+                    if sp.exists() {
+                        let _ = trash::delete(sp);
+                    }
+                }
+            }
+        }
+    }
+
     Ok(())
+}
+
+#[tauri::command]
+fn undo_last_action(undo_state: tauri::State<UndoState>) -> Result<String, String> {
+    let mut stack = undo_state.0.lock().map_err(|e| e.to_string())?;
+    let action = match stack.pop() {
+        Some(a) => a,
+        None => return Err("되돌릴 작업이 없습니다.".to_string()),
+    };
+
+    match action {
+        UndoAction::Delete { items } => {
+            let mut restored_count = 0;
+            for (orig_p_str, staged_p_str) in items {
+                let orig_p = Path::new(&orig_p_str);
+                let staged_p = Path::new(&staged_p_str);
+                if staged_p.exists() {
+                    if let Some(parent) = orig_p.parent() {
+                        let _ = std::fs::create_dir_all(parent);
+                    }
+                    if std::fs::rename(staged_p, orig_p).is_ok() {
+                        restored_count += 1;
+                    } else if copy_entry_recursive(staged_p, orig_p).is_ok() {
+                        let _ = if staged_p.is_dir() {
+                            std::fs::remove_dir_all(staged_p)
+                        } else {
+                            std::fs::remove_file(staged_p)
+                        };
+                        restored_count += 1;
+                    }
+                }
+            }
+            Ok(format!("삭제된 항목 {}개를 원래 위치로 복원했습니다.", restored_count))
+        }
+        UndoAction::Rename { old_path, new_path } => {
+            let old_p = Path::new(&old_path);
+            let new_p = Path::new(&new_path);
+            if !new_p.exists() {
+                return Err("되돌릴 대상 파일이 존재하지 않습니다.".to_string());
+            }
+            std::fs::rename(new_p, old_p)
+                .map_err(|e| format!("이름 바꾸기 되돌리기 실패: {}", e))?;
+            let name = old_p.file_name().and_then(|n| n.to_str()).unwrap_or("");
+            Ok(format!("'{}'(으)로 이름을 되돌렸습니다.", name))
+        }
+        UndoAction::Move { items } => {
+            let mut restored_count = 0;
+            for (orig_p_str, dest_p_str) in items {
+                let orig_p = Path::new(&orig_p_str);
+                let dest_p = Path::new(&dest_p_str);
+                if dest_p.exists() {
+                    if let Some(parent) = orig_p.parent() {
+                        let _ = std::fs::create_dir_all(parent);
+                    }
+                    if std::fs::rename(dest_p, orig_p).is_ok() {
+                        restored_count += 1;
+                    } else if copy_entry_recursive(dest_p, orig_p).is_ok() {
+                        let _ = if dest_p.is_dir() {
+                            std::fs::remove_dir_all(dest_p)
+                        } else {
+                            std::fs::remove_file(dest_p)
+                        };
+                        restored_count += 1;
+                    }
+                }
+            }
+            Ok(format!("이동된 항목 {}개를 원래 위치로 되돌렸습니다.", restored_count))
+        }
+    }
+}
+
+#[tauri::command]
+fn rename_file(
+    old_path: String,
+    new_name: String,
+    undo_state: tauri::State<UndoState>,
+) -> Result<String, String> {
+    validate_windows_filename(&new_name)?;
+
+    let old_p = Path::new(&old_path);
+    if !old_p.exists() {
+        return Err("변경할 파일이 존재하지 않습니다.".to_string());
+    }
+
+    let parent = old_p
+        .parent()
+        .ok_or_else(|| "부모 디렉터리를 찾을 수 없습니다.".to_string())?;
+    let new_p = parent.join(&new_name);
+
+    if new_p.exists() && old_p != new_p {
+        return Err("같은 이름의 파일이 이미 존재합니다.".to_string());
+    }
+
+    std::fs::rename(old_p, &new_p).map_err(|e| format!("이름 변경 실패: {}", e))?;
+
+    let new_path_str = new_p.to_string_lossy().into_owned();
+
+    let mut stack = undo_state.0.lock().map_err(|e| e.to_string())?;
+    stack.push(UndoAction::Rename {
+        old_path: old_path.clone(),
+        new_path: new_path_str.clone(),
+    });
+    while stack.len() > 20 {
+        let evicted = stack.remove(0);
+        if let UndoAction::Delete { items } = evicted {
+            for (_, staged_p) in items {
+                let sp = Path::new(&staged_p);
+                if sp.exists() {
+                    let _ = trash::delete(sp);
+                }
+            }
+        }
+    }
+
+    Ok(new_path_str)
+}
+
+#[tauri::command]
+fn copy_files_to_folder(
+    source_paths: Vec<String>,
+    target_folder: String,
+    conflict_mode: String,
+) -> Result<Vec<String>, String> {
+    let target_dir = Path::new(&target_folder);
+    if !target_dir.exists() {
+        std::fs::create_dir_all(target_dir).map_err(|e| format!("대상 폴더 생성 실패: {}", e))?;
+    }
+
+    let mut copied_paths = Vec::new();
+
+    for src_str in source_paths {
+        let src_p = Path::new(&src_str);
+        if !src_p.exists() {
+            continue;
+        }
+        let file_name = match src_p.file_name().and_then(|n| n.to_str()) {
+            Some(n) => n,
+            None => continue,
+        };
+
+        let dest_p = match conflict_mode.as_str() {
+            "overwrite" => target_dir.join(file_name),
+            "skip" => {
+                let p = target_dir.join(file_name);
+                if p.exists() {
+                    continue;
+                }
+                p
+            }
+            "rename" | _ => get_unique_target_path(target_dir, file_name),
+        };
+
+        if src_p == dest_p {
+            continue;
+        }
+
+        if let Err(e) = copy_entry_recursive(src_p, &dest_p) {
+            return Err(format!("파일 복사 실패 ({}): {}", file_name, e));
+        }
+
+        copied_paths.push(dest_p.to_string_lossy().into_owned());
+    }
+
+    Ok(copied_paths)
+}
+
+#[tauri::command]
+fn move_files_to_folder(
+    source_paths: Vec<String>,
+    target_folder: String,
+    conflict_mode: String,
+    undo_state: tauri::State<UndoState>,
+) -> Result<Vec<String>, String> {
+    let target_dir = Path::new(&target_folder);
+    if !target_dir.exists() {
+        std::fs::create_dir_all(target_dir).map_err(|e| format!("대상 폴더 생성 실패: {}", e))?;
+    }
+
+    let mut moved_paths = Vec::new();
+    let mut undo_moves = Vec::new();
+
+    for src_str in source_paths {
+        let src_p = Path::new(&src_str);
+        if !src_p.exists() {
+            continue;
+        }
+        let file_name = match src_p.file_name().and_then(|n| n.to_str()) {
+            Some(n) => n,
+            None => continue,
+        };
+
+        let dest_p = match conflict_mode.as_str() {
+            "overwrite" => {
+                let p = target_dir.join(file_name);
+                if p.exists() && p != src_p {
+                    let _ = std::fs::remove_file(&p);
+                }
+                p
+            }
+            "skip" => {
+                let p = target_dir.join(file_name);
+                if p.exists() {
+                    continue;
+                }
+                p
+            }
+            "rename" | _ => get_unique_target_path(target_dir, file_name),
+        };
+
+        if src_p == dest_p {
+            continue;
+        }
+
+        let moved = if std::fs::rename(src_p, &dest_p).is_ok() {
+            true
+        } else if copy_entry_recursive(src_p, &dest_p).is_ok() {
+            let _ = if src_p.is_dir() {
+                std::fs::remove_dir_all(src_p)
+            } else {
+                std::fs::remove_file(src_p)
+            };
+            true
+        } else {
+            false
+        };
+
+        if moved {
+            let dest_str = dest_p.to_string_lossy().into_owned();
+            undo_moves.push((src_str, dest_str.clone()));
+            moved_paths.push(dest_str);
+        }
+    }
+
+    if !undo_moves.is_empty() {
+        let mut stack = undo_state.0.lock().map_err(|e| e.to_string())?;
+        stack.push(UndoAction::Move { items: undo_moves });
+        while stack.len() > 20 {
+            let evicted = stack.remove(0);
+            if let UndoAction::Delete { items } = evicted {
+                for (_, staged_p) in items {
+                    let sp = Path::new(&staged_p);
+                    if sp.exists() {
+                        let _ = trash::delete(sp);
+                    }
+                }
+            }
+        }
+    }
+
+    Ok(moved_paths)
+}
+
+#[tauri::command]
+fn create_new_folder(parent_path: String, folder_name: Option<String>) -> Result<String, String> {
+    let parent = Path::new(&parent_path);
+    if !parent.is_dir() {
+        return Err("상위 폴더가 존재하지 않습니다.".to_string());
+    }
+
+    let base_name = folder_name.unwrap_or_else(|| "새 폴더".to_string());
+    let mut candidate = parent.join(&base_name);
+    let mut counter = 2;
+    while candidate.exists() {
+        candidate = parent.join(format!("{} ({})", base_name, counter));
+        counter += 1;
+    }
+
+    std::fs::create_dir(&candidate).map_err(|e| format!("새 폴더 생성 실패: {}", e))?;
+    Ok(candidate.to_string_lossy().into_owned())
+}
+
+#[tauri::command]
+fn copy_files_to_clipboard(paths: Vec<String>) -> Result<(), String> {
+    if paths.is_empty() {
+        return Ok(());
+    }
+
+    let mut utf16_bytes: Vec<u16> = Vec::new();
+    for p in paths {
+        utf16_bytes.extend(p.encode_utf16());
+        utf16_bytes.push(0);
+    }
+    utf16_bytes.push(0);
+
+    let dropfiles_size = std::mem::size_of::<DROPFILES>();
+    let total_bytes = dropfiles_size + (utf16_bytes.len() * 2);
+
+    unsafe {
+        let h_mem = GlobalAlloc(GMEM_MOVEABLE, total_bytes);
+        if h_mem.is_null() {
+            return Err("클립보드 메모리 할당 실패".to_string());
+        }
+
+        let ptr = GlobalLock(h_mem) as *mut u8;
+        if ptr.is_null() {
+            return Err("클립보드 메모리 잠금 실패".to_string());
+        }
+
+        let df = DROPFILES {
+            pFiles: dropfiles_size as u32,
+            pt: POINT { x: 0, y: 0 },
+            fNC: 0,
+            fWide: 1,
+        };
+
+        std::ptr::copy_nonoverlapping(&df as *const _ as *const u8, ptr, dropfiles_size);
+        std::ptr::copy_nonoverlapping(
+            utf16_bytes.as_ptr() as *const u8,
+            ptr.add(dropfiles_size),
+            utf16_bytes.len() * 2,
+        );
+
+        GlobalUnlock(h_mem);
+
+        if OpenClipboard(std::ptr::null_mut()) == 0 {
+            return Err("클립보드를 열 수 없습니다.".to_string());
+        }
+
+        EmptyClipboard();
+        const CF_HDROP: u32 = 15;
+        let res = SetClipboardData(CF_HDROP, h_mem);
+        CloseClipboard();
+
+        if res.is_null() {
+            return Err("클립보드 데이터 설정 실패".to_string());
+        }
+    }
+
+    Ok(())
+}
+
+#[tauri::command]
+fn paste_files_from_clipboard(
+    target_folder: String,
+    _undo_state: tauri::State<UndoState>,
+) -> Result<Vec<String>, String> {
+    const CF_HDROP: u32 = 15;
+    let paths = unsafe {
+        if IsClipboardFormatAvailable(CF_HDROP) == 0 {
+            return Ok(Vec::new());
+        }
+        if OpenClipboard(std::ptr::null_mut()) == 0 {
+            return Err("클립보드를 열 수 없습니다.".to_string());
+        }
+        let h_data = GetClipboardData(CF_HDROP);
+        if h_data.is_null() {
+            CloseClipboard();
+            return Ok(Vec::new());
+        }
+
+        let ptr = GlobalLock(h_data) as *const u8;
+        if ptr.is_null() {
+            CloseClipboard();
+            return Ok(Vec::new());
+        }
+
+        let df = &*(ptr as *const DROPFILES);
+        let files_offset = df.pFiles as usize;
+        let is_wide = df.fWide != 0;
+
+        let mut extracted_paths = Vec::new();
+        if is_wide {
+            let u16_ptr = ptr.add(files_offset) as *const u16;
+            let mut i = 0;
+            loop {
+                let start = i;
+                while *u16_ptr.add(i) != 0 {
+                    i += 1;
+                }
+                if i == start {
+                    break;
+                }
+                let slice = std::slice::from_raw_parts(u16_ptr.add(start), i - start);
+                let path_str = String::from_utf16_lossy(slice);
+                extracted_paths.push(path_str);
+                i += 1;
+            }
+        }
+
+        GlobalUnlock(h_data);
+        CloseClipboard();
+        extracted_paths
+    };
+
+    if paths.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    copy_files_to_folder(paths, target_folder, "rename".to_string())
+}
+
+#[tauri::command]
+fn open_in_external_editor(path: String, custom_app: Option<String>) -> Result<(), String> {
+    let p = Path::new(&path);
+    if !p.exists() {
+        return Err("파일이 존재하지 않습니다.".to_string());
+    }
+
+    if let Some(app) = custom_app {
+        if !app.trim().is_empty() {
+            std::process::Command::new(app)
+                .arg(&path)
+                .spawn()
+                .map_err(|e| format!("외부 편집기를 실행할 수 없습니다: {}", e))?;
+            return Ok(());
+        }
+    }
+
+    if std::process::Command::new("mspaint").arg(&path).spawn().is_err() {
+        std::process::Command::new("cmd")
+            .args(&["/c", "start", "", &path])
+            .spawn()
+            .map_err(|e| format!("기본 프로그램을 실행할 수 없습니다: {}", e))?;
+    }
+
+    Ok(())
+}
+
+#[tauri::command]
+fn set_as_desktop_wallpaper(
+    app: tauri::AppHandle,
+    image_path: String,
+    style: String,
+    is_archive: bool,
+    archive_path: Option<String>,
+    entry_name: Option<String>,
+) -> Result<(), String> {
+    let resolved_path = if is_archive {
+        if let (Some(arch), Some(entry)) = (archive_path, entry_name) {
+            get_archive_entry_image(app, arch, entry)?
+        } else {
+            return Err("압축 파일 정보를 찾을 수 없습니다.".to_string());
+        }
+    } else {
+        image_path
+    };
+
+    let p = Path::new(&resolved_path);
+    if !p.exists() {
+        return Err("이미지 파일이 존재하지 않습니다.".to_string());
+    }
+
+    let style_val = match style.as_str() {
+        "fit" => "6",
+        "center" => "0",
+        "fill" | _ => "10",
+    };
+
+    let _ = std::process::Command::new("reg")
+        .args(&[
+            "add",
+            "HKCU\\Control Panel\\Desktop",
+            "/v",
+            "WallpaperStyle",
+            "/t",
+            "REG_SZ",
+            "/d",
+            style_val,
+            "/f",
+        ])
+        .output();
+
+    let _ = std::process::Command::new("reg")
+        .args(&[
+            "add",
+            "HKCU\\Control Panel\\Desktop",
+            "/v",
+            "TileWallpaper",
+            "/t",
+            "REG_SZ",
+            "/d",
+            "0",
+            "/f",
+        ])
+        .output();
+
+    let mut wide_path: Vec<u16> = resolved_path.encode_utf16().collect();
+    wide_path.push(0);
+
+    unsafe {
+        let ret = SystemParametersInfoW(
+            SPI_SETDESKWALLPAPER,
+            0,
+            wide_path.as_ptr() as *mut _,
+            SPIF_UPDATEINIFILE | SPIF_SENDCHANGE,
+        );
+        if ret == 0 {
+            return Err("바탕화면 배경 설정 실패".to_string());
+        }
+    }
+
+    Ok(())
+}
+
+#[tauri::command]
+fn save_clipboard_image(base64_data: String, target_path: String) -> Result<String, String> {
+    use std::io::Write;
+    let target = Path::new(&target_path);
+    if let Some(parent) = target.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+
+    let raw_b64 = if let Some(idx) = base64_data.find(',') {
+        &base64_data[idx + 1..]
+    } else {
+        &base64_data
+    };
+
+    use base64::Engine;
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(raw_b64.trim())
+        .map_err(|e| format!("Base64 디코딩 실패: {}", e))?;
+
+    let mut file = File::create(target).map_err(|e| format!("파일 생성 실패: {}", e))?;
+    file.write_all(&bytes).map_err(|e| format!("파일 쓰기 실패: {}", e))?;
+
+    Ok(target.to_string_lossy().into_owned())
+}
+
+#[tauri::command]
+fn check_path_exists(path: String) -> bool {
+    Path::new(&path).exists()
 }
 
 #[tauri::command]
@@ -1371,7 +2275,9 @@ pub fn run() {
     tauri::Builder::default()
         .manage(InitialFile(Mutex::new(initial_path)))
         .manage(FolderWatcherState(Mutex::new(None)))
+        .manage(UndoState(Mutex::new(Vec::new())))
         .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_drag::init())
         .plugin(tauri_plugin_window_state::Builder::default().build())
         .plugin(tauri_plugin_single_instance::init(|app, argv, _cwd| {
             if let Some(window) = app.get_webview_window("main") {
@@ -1396,7 +2302,18 @@ pub fn run() {
             show_in_folder,
             delete_to_trash,
             delete_paths_to_trash,
+            undo_last_action,
+            rename_file,
+            copy_files_to_folder,
+            move_files_to_folder,
+            create_new_folder,
+            copy_files_to_clipboard,
+            paste_files_from_clipboard,
+            open_in_external_editor,
+            set_as_desktop_wallpaper,
+            save_clipboard_image,
             save_rotated_image,
+            save_image_advanced,
             get_archive_entry_image,
             load_settings,
             save_settings,
@@ -1407,7 +2324,8 @@ pub fn run() {
             get_subfolders,
             scan_explorer_folder,
             watch_folder,
-            unwatch_folder
+            unwatch_folder,
+            check_path_exists
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
