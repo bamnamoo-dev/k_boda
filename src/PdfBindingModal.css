@@ -1,0 +1,446 @@
+.pdf-modal-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 1050;
+  background-color: rgba(0, 0, 0, 0.75);
+  backdrop-filter: blur(4px);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+}
+
+.pdf-modal-container {
+  width: 92vw;
+  max-width: 1100px;
+  height: 85vh;
+  background-color: #1a1a22;
+  color: #ececec;
+  border-radius: 12px;
+  border: 1px solid #333342;
+  box-shadow: 0 20px 40px rgba(0, 0, 0, 0.6);
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.pdf-modal-header {
+  height: 52px;
+  padding: 0 20px;
+  background-color: #21212c;
+  border-bottom: 1px solid #2f2f3e;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.pdf-header-title {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.pdf-header-title h2 {
+  font-size: 16px;
+  font-weight: 600;
+  margin: 0;
+}
+
+.pdf-badge {
+  font-size: 12px;
+  background-color: #2e384d;
+  color: #7aa2f7;
+  padding: 2px 8px;
+  border-radius: 12px;
+}
+
+.pdf-close-btn {
+  background: none;
+  border: none;
+  color: #999;
+  cursor: pointer;
+  padding: 6px;
+  border-radius: 6px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: all 0.15s;
+}
+
+.pdf-close-btn:hover {
+  background-color: #38384a;
+  color: #fff;
+}
+
+.pdf-main-body {
+  flex: 1;
+  display: flex;
+  min-height: 0;
+}
+
+.pdf-items-pane {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  background-color: #131318;
+  padding: 16px;
+  gap: 12px;
+  min-width: 0;
+}
+
+.pane-header-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding-bottom: 6px;
+  border-bottom: 1px solid #282834;
+}
+
+.pane-title {
+  font-size: 13px;
+  font-weight: 600;
+  color: #ccc;
+}
+
+.pane-subtitle {
+  font-size: 12px;
+  color: #7aa2f7;
+}
+
+.pdf-items-list {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  overflow-y: auto;
+  padding-right: 4px;
+}
+
+.pdf-item-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 8px 12px;
+  background-color: #1f1f28;
+  border: 1px solid #2b2b38;
+  border-radius: 8px;
+  transition: background-color 0.15s;
+}
+
+.pdf-item-row:hover {
+  background-color: #252532;
+}
+
+.item-order-num {
+  font-size: 12px;
+  font-weight: 700;
+  color: #888;
+  width: 20px;
+  text-align: center;
+}
+
+.item-thumb {
+  width: 52px;
+  height: 52px;
+  object-fit: cover;
+  border-radius: 4px;
+  background-color: #111;
+  border: 1px solid #333;
+}
+
+.item-info-col {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 0;
+}
+
+.item-filename {
+  font-size: 13px;
+  color: #eee;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.item-page-hint {
+  font-size: 11px;
+  color: #777;
+}
+
+.item-move-btns {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.item-move-btns button {
+  background-color: #2a2a38;
+  border: 1px solid #38384a;
+  color: #aaa;
+  border-radius: 4px;
+  padding: 4px 6px;
+  cursor: pointer;
+}
+
+.item-move-btns button:hover:not(:disabled) {
+  background-color: #3b3b4f;
+  color: #fff;
+}
+
+.item-move-btns button:disabled {
+  opacity: 0.3;
+  cursor: not-allowed;
+}
+
+.item-remove-btn:hover {
+  color: #ef4444 !important;
+  border-color: #ef4444 !important;
+}
+
+.pdf-options-sidebar {
+  width: 340px;
+  background-color: #1c1c24;
+  border-left: 1px solid #2c2c38;
+  display: flex;
+  flex-direction: column;
+  padding: 16px;
+  gap: 16px;
+  overflow-y: auto;
+}
+
+.pdf-option-group {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.option-label {
+  font-size: 13px;
+  font-weight: 600;
+  color: #bbb;
+}
+
+.option-button-row {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 6px;
+}
+
+.opt-btn {
+  padding: 8px 4px;
+  background-color: #262633;
+  border: 1px solid #363646;
+  border-radius: 6px;
+  color: #aaa;
+  font-size: 12px;
+  cursor: pointer;
+  transition: all 0.15s;
+}
+
+.opt-btn:hover {
+  background-color: #303040;
+  color: #fff;
+}
+
+.opt-btn.active {
+  background-color: #2563eb;
+  color: #fff;
+  border-color: #3b82f6;
+  font-weight: 600;
+}
+
+.checkbox-opt-label {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 13px;
+  color: #ccc;
+  cursor: pointer;
+}
+
+.option-button-col {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.radio-opt-card {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  padding: 10px;
+  background-color: #232330;
+  border: 1px solid #333344;
+  border-radius: 8px;
+  cursor: pointer;
+}
+
+.radio-opt-card:hover {
+  background-color: #282837;
+}
+
+.card-texts {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.card-title {
+  font-size: 12px;
+  font-weight: 600;
+  color: #ddd;
+}
+
+.card-desc {
+  font-size: 11px;
+  color: #888;
+  line-height: 1.35;
+}
+
+.pdf-sidebar-footer {
+  margin-top: auto;
+  padding-top: 14px;
+  border-top: 1px solid #2c2c38;
+}
+
+.generate-pdf-btn {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  padding: 13px;
+  background-color: #2563eb;
+  color: #fff;
+  border: none;
+  border-radius: 8px;
+  font-size: 14px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: all 0.15s;
+}
+
+.generate-pdf-btn:hover:not(:disabled) {
+  background-color: #1d4ed8;
+}
+
+.generate-pdf-btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+/* 완료 화면 스타일 */
+.pdf-success-view {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  padding: 32px;
+  gap: 16px;
+  text-align: center;
+}
+
+.success-icon-box {
+  margin-bottom: 8px;
+}
+
+.pdf-success-view h3 {
+  font-size: 20px;
+  font-weight: 600;
+  color: #fff;
+  margin: 0;
+}
+
+.success-path {
+  font-size: 13px;
+  color: #93c5fd;
+  background-color: #1c2738;
+  padding: 6px 14px;
+  border-radius: 6px;
+  max-width: 80%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.success-stats-box {
+  display: flex;
+  gap: 16px;
+  margin: 12px 0;
+}
+
+.stat-card {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 14px 24px;
+  background-color: #22222d;
+  border: 1px solid #333342;
+  border-radius: 8px;
+}
+
+.stat-label {
+  font-size: 12px;
+  color: #888;
+}
+
+.stat-val {
+  font-size: 16px;
+  font-weight: 700;
+  color: #10b981;
+}
+
+.success-hint {
+  font-size: 13px;
+  color: #aaa;
+  margin: 0;
+}
+
+.success-action-btns {
+  display: flex;
+  gap: 12px;
+  margin-top: 16px;
+}
+
+.action-btn {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 18px;
+  border-radius: 6px;
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+  border: none;
+}
+
+.action-btn.primary {
+  background-color: #2563eb;
+  color: #fff;
+}
+
+.action-btn.primary:hover {
+  background-color: #1d4ed8;
+}
+
+.action-btn.secondary {
+  background-color: #2a2a38;
+  color: #eee;
+  border: 1px solid #3a3a4c;
+}
+
+.action-btn.secondary:hover {
+  background-color: #353546;
+}
+
+.action-btn.tertiary {
+  background: none;
+  color: #aaa;
+}
+
+.action-btn.tertiary:hover {
+  color: #fff;
+}

@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { convertFileSrc, invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
@@ -30,11 +30,28 @@ import {
   Filter,
 } from "lucide-react";
 import "./App.css";
+import { IdPhotoEditor } from "./IdPhotoEditor";
+import { CadViewer } from "./CadViewer";
+import { BatchProcessingModal } from "./BatchProcessingModal";
+import type { BatchModalMode } from "./batchTypes";
+import { MosaicEditorModal } from "./MosaicEditorModal";
+import { PhotoCollageModal } from "./PhotoCollageModal";
+import { PdfBindingModal } from "./PdfBindingModal";
+import { PhotoStampModal } from "./PhotoStampModal";
+import { CropOverlay, type CropArea } from "./CropOverlay";
+import { AdjustModal, type AdjustParams } from "./AdjustModal";
 
-const APP_NAME = "PrismView";
-const IMAGE_EXTENSIONS = ["jpg", "jpeg", "jfif", "png", "gif", "webp", "avif", "bmp", "svg"];
+const APP_NAME = "k-boda";
+const IMAGE_EXTENSIONS = ["jpg", "jpeg", "jfif", "png", "gif", "webp", "avif", "bmp", "svg", "tif", "tiff", "heic", "heif"];
 const ARCHIVE_EXTENSIONS = ["zip", "cbz"];
-const ALL_SUPPORTED_EXTENSIONS = [...IMAGE_EXTENSIONS, ...ARCHIVE_EXTENSIONS];
+const CAD_EXTENSIONS = ["dwg", "dxf"];
+const ALL_SUPPORTED_EXTENSIONS = [...IMAGE_EXTENSIONS, ...ARCHIVE_EXTENSIONS, ...CAD_EXTENSIONS];
+
+const isCadPath = (p?: string | null): boolean => {
+  if (!p) return false;
+  const lower = p.toLowerCase();
+  return lower.endsWith(".dwg") || lower.endsWith(".dxf");
+};
 
 // 줌 배율 범위 (2% ~ 6400%)
 const MIN_SCALE = 0.02;
@@ -89,6 +106,7 @@ export type AppSettings = {
   recentTargetFolders: string[];
   externalEditors: ExternalEditor[];
   explorerFilter: ExplorerFilter;
+  cadFileAssociation?: boolean;
 };
 
 export type SystemLocation = {
@@ -106,7 +124,7 @@ export type SubfolderItem = {
 export type ExplorerItem = {
   name: string;
   path: string;
-  kind: "folder" | "archive" | "image";
+  kind: "folder" | "archive" | "image" | "cad";
   size: number;
   modified: number;
   extension: string;
@@ -319,6 +337,28 @@ function App() {
   // 8단계: 화면 모드 ("viewer" | "explorer")
   const [appMode, setAppMode] = useState<"viewer" | "explorer">("viewer");
 
+  // 12단계: 증명사진 만들기 대상 파일 목록
+  const [idPhotoTargetPaths, setIdPhotoTargetPaths] = useState<string[] | null>(null);
+
+  // 14단계 B: 일괄 작업 (변환, 이름 바꾸기, 회전) 모달 상태
+  const [batchModalState, setBatchModalState] = useState<{ mode: BatchModalMode; paths: string[] } | null>(null);
+
+  // 14단계 C: 학교 행정실 사진 작업 (모자이크, 사진 합치기, PDF 묶기, 날짜·글자 넣기) 모달 상태
+  const [mosaicModalPath, setMosaicModalPath] = useState<string | null>(null);
+  const [photoCollagePaths, setPhotoCollagePaths] = useState<string[] | null>(null);
+  const [pdfBindingPaths, setPdfBindingPaths] = useState<string[] | null>(null);
+  const [photoStampPaths, setPhotoStampPaths] = useState<string[] | null>(null);
+
+  // 14단계 A: 자르기, 간단 보정, TIFF 다중페이지, HEIC 변환 상태
+  const [isCropping, setIsCropping] = useState<boolean>(false);
+  const [activeCrop, setActiveCrop] = useState<CropArea | null>(null);
+  const [showAdjustModal, setShowAdjustModal] = useState<boolean>(false);
+  const [activeAdjust, setActiveAdjust] = useState<AdjustParams>({ brightness: 0, contrast: 0, saturation: 0, sharpness: 0 });
+  const [liveAdjust, setLiveAdjust] = useState<AdjustParams>({ brightness: 0, contrast: 0, saturation: 0, sharpness: 0 });
+  const [tiffPageInfo, setTiffPageInfo] = useState<{ totalPages: number; currentPage: number } | null>(null);
+  const [heicCodecMissing, setHeicCodecMissing] = useState<boolean>(false);
+  const [pendingNavigate, setPendingNavigate] = useState<(() => void) | null>(null);
+
   // 8단계: 탐색기 모드 전용 상태
   const [currentExplorerPath, setCurrentExplorerPath] = useState<string>("");
   const [explorerResult, setExplorerResult] = useState<ExplorerFolderResult | null>(null);
@@ -364,6 +404,7 @@ function App() {
     recentTargetFolders: [],
     externalEditors: [],
     explorerFilter: "all",
+    cadFileAssociation: false,
   });
 
   // 10단계: 이름 바꾸기(F2) 모달 상태
@@ -426,6 +467,7 @@ function App() {
   const [isFullscreen, setIsFullscreen] = useState(false);
   const [isMouseAtTop, setIsMouseAtTop] = useState(false);
   const [contextMenu, setContextMenu] = useState<{ x: number; y: number } | null>(null);
+  const contextMenuRef = useRef<HTMLDivElement>(null);
 
   // 토스트 안내 문구
   const [toastMessage, setToastMessage] = useState<string | null>(null);
@@ -829,6 +871,69 @@ function App() {
     });
   }, []);
 
+  // 14단계 A: TIFF 다중 페이지 및 HEIC 윈도우 코덱 연동 처리
+  const resolveDisplayablePath = useCallback(
+    async (filePath: string, pageIndex = 0): Promise<string> => {
+      const ext = filePath.split(".").pop()?.toLowerCase() || "";
+      if (ext === "tif" || ext === "tiff") {
+        try {
+          const res = await invoke<{ totalPages: number; pageIndex: number; displayPath: string }>(
+            "get_tiff_page",
+            { path: filePath, pageIndex }
+          );
+          setTiffPageInfo({ totalPages: res.totalPages, currentPage: res.pageIndex });
+          return res.displayPath;
+        } catch (e) {
+          console.error("TIFF 디코딩 실패:", e);
+          setTiffPageInfo(null);
+          return filePath;
+        }
+      } else {
+        setTiffPageInfo(null);
+      }
+
+      if (ext === "heic" || ext === "heif") {
+        try {
+          const convertedPath = await invoke<string>("get_heic_display_path", { path: filePath });
+          setHeicCodecMissing(false);
+          return convertedPath;
+        } catch (e) {
+          if (String(e).includes("HEIC_CODEC_MISSING")) {
+            setHeicCodecMissing(true);
+          }
+          return filePath;
+        }
+      } else {
+        setHeicCodecMissing(false);
+      }
+
+      return filePath;
+    },
+    []
+  );
+
+  // 14단계 A: TIFF 페이지 전환 핸들러
+  const handleTiffPageChange = useCallback(
+    async (newPageIndex: number) => {
+      if (view.kind !== "image" || !view.path || !tiffPageInfo) return;
+      try {
+        const res = await invoke<{ totalPages: number; pageIndex: number; displayPath: string }>(
+          "get_tiff_page",
+          { path: view.path, pageIndex: newPageIndex }
+        );
+        setTiffPageInfo({ totalPages: res.totalPages, currentPage: res.pageIndex });
+        setView((prev) =>
+          prev.kind === "image"
+            ? { ...prev, src: convertFileSrc(res.displayPath) }
+            : prev
+        );
+      } catch (e) {
+        showToast(`페이지 전환 실패: ${e}`);
+      }
+    },
+    [view, tiffPageInfo, showToast]
+  );
+
   // 파일 열기
   const openPath = useCallback(
     (
@@ -842,7 +947,7 @@ function App() {
         sortBy: newSortBy,
         sortOrder: newSortOrder,
       })
-        .then((res) => {
+        .then(async (res) => {
           if (id !== requestId.current) return;
           setItems(res.items);
           itemsRef.current = res.items;
@@ -854,6 +959,12 @@ function App() {
           setSecondLoaded(false);
           setMeta(null);
           setSecondMeta(null);
+
+          // 편집 상태 초기화
+          setActiveCrop(null);
+          setIsCropping(false);
+          setActiveAdjust({ brightness: 0, contrast: 0, saturation: 0, sharpness: 0 });
+          setLiveAdjust({ brightness: 0, contrast: 0, saturation: 0, sharpness: 0 });
 
           if (!settingsRef.current.keepTransform) {
             setIsFit(true);
@@ -867,9 +978,11 @@ function App() {
             fileName: baseName(path),
           };
 
+          const displayPath = await resolveDisplayablePath(currentItem.path, 0);
+
           setView({
             kind: "image",
-            src: convertFileSrc(currentItem.path),
+            src: convertFileSrc(displayPath),
             fileName: currentItem.fileName,
             path: currentItem.path,
             isArchive: currentItem.isArchiveEntry,
@@ -886,7 +999,7 @@ function App() {
           setWindowTitle(fileName);
         });
     },
-    [pingTopBar, loadDetails]
+    [pingTopBar, loadDetails, resolveDisplayablePath]
   );
 
   const openPathRef = useRef(openPath);
@@ -944,11 +1057,62 @@ function App() {
     });
   }, [getInitialTransform, currentExplorerPath]);
 
-  // 인덱스 이동
+  // 14단계 A: 미저장 편집 상태 확인
+  const hasUnsavedEdits = Boolean(
+    activeCrop !== null ||
+    activeAdjust.brightness !== 0 ||
+    activeAdjust.contrast !== 0 ||
+    activeAdjust.saturation !== 0 ||
+    activeAdjust.sharpness !== 0 ||
+    rotation !== 0 ||
+    flipH ||
+    flipV
+  );
+
+  // 14단계 A: 회전/반전/자르기/보정 통합 사본 저장 (원본 절대 덮어쓰지 않음)
+  const handleSaveEditedCopy = useCallback(async () => {
+    if (view.kind !== "image" || !view.path) return;
+    try {
+      const savedPath = await invoke<string>("save_edited_advanced", {
+        sourcePath: view.path,
+        crop: activeCrop
+          ? {
+              x: activeCrop.x,
+              y: activeCrop.y,
+              width: activeCrop.width,
+              height: activeCrop.height,
+            }
+          : null,
+        adjust: activeAdjust,
+        rotation,
+        flipH,
+        flipV,
+        targetPath: null,
+      });
+      showToast(`편집 사본이 저장되었습니다: ${baseName(savedPath)}`);
+      setActiveCrop(null);
+      setIsCropping(false);
+      setActiveAdjust({ brightness: 0, contrast: 0, saturation: 0, sharpness: 0 });
+      setLiveAdjust({ brightness: 0, contrast: 0, saturation: 0, sharpness: 0 });
+      setRotation(0);
+      setFlipH(false);
+      setFlipV(false);
+    } catch (e) {
+      showToast(`사본 저장 실패: ${e}`);
+    }
+  }, [view, activeCrop, activeAdjust, rotation, flipH, flipV, showToast]);
+
+  // 인덱스 이동 (미저장 편집 확인 포함)
   const navigateToIndex = useCallback(
-    async (nextIdx: number) => {
+    async (nextIdx: number, force = false) => {
       const curItems = itemsRef.current;
       if (curItems.length === 0) return;
+
+      // 14단계 A: 미저장 변경 사항이 있으면 확인 모달 띄우기
+      if (!force && hasUnsavedEdits) {
+        setPendingNavigate(() => () => navigateToIndex(nextIdx, true));
+        return;
+      }
 
       if (nextIdx < 0) {
         if (settingsRef.current.autoNextFolder && curItems[0]?.path && !curItems[0]?.isArchiveEntry) {
@@ -1000,6 +1164,12 @@ function App() {
       setMeta(null);
       setSecondMeta(null);
 
+      // 편집 상태 초기화
+      setActiveCrop(null);
+      setIsCropping(false);
+      setActiveAdjust({ brightness: 0, contrast: 0, saturation: 0, sharpness: 0 });
+      setLiveAdjust({ brightness: 0, contrast: 0, saturation: 0, sharpness: 0 });
+
       // 9단계: keepTransform 옵션 확인 (false면 회전 및 반전 초기화)
       if (!settingsRef.current.keepTransform) {
         setIsFit(true);
@@ -1010,10 +1180,11 @@ function App() {
 
       // ZIP 아카이브 내부 파일인 경우 온디맨드 추출 확인
       const actualPath = await ensureArchiveEntryPath(item);
+      const displayPath = await resolveDisplayablePath(actualPath, 0);
 
       setView({
         kind: "image",
-        src: convertFileSrc(actualPath),
+        src: convertFileSrc(displayPath),
         fileName: item.fileName,
         path: actualPath,
         isArchive: item.isArchiveEntry,
@@ -1028,19 +1199,29 @@ function App() {
         filmstripScrollRef.current.scrollTo({ left: Math.max(0, targetScroll), behavior: "smooth" });
       }
     },
-    [showToast, pingTopBar, loadDetails, filmstripWidth, ensureArchiveEntryPath]
+    [showToast, pingTopBar, loadDetails, filmstripWidth, ensureArchiveEntryPath, hasUnsavedEdits, resolveDisplayablePath]
   );
 
   // 양면 보기 고려한 다음/이전 이동
   const step = isDoublePage ? 2 : 1;
 
   const goToNext = useCallback(() => {
+    // 다중 페이지 TIFF인 경우 내부 페이지 다음으로 먼저 이동
+    if (tiffPageInfo && tiffPageInfo.currentPage < tiffPageInfo.totalPages - 1) {
+      void handleTiffPageChange(tiffPageInfo.currentPage + 1);
+      return;
+    }
     navigateToIndex(currentIndexRef.current + step);
-  }, [navigateToIndex, step]);
+  }, [navigateToIndex, step, tiffPageInfo, handleTiffPageChange]);
 
   const goToPrev = useCallback(() => {
+    // 다중 페이지 TIFF인 경우 내부 페이지 이전으로 먼저 이동
+    if (tiffPageInfo && tiffPageInfo.currentPage > 0) {
+      void handleTiffPageChange(tiffPageInfo.currentPage - 1);
+      return;
+    }
     navigateToIndex(currentIndexRef.current - step);
-  }, [navigateToIndex, step]);
+  }, [navigateToIndex, step, tiffPageInfo, handleTiffPageChange]);
 
   const goToFirst = useCallback(() => {
     navigateToIndex(0);
@@ -1321,7 +1502,7 @@ function App() {
     const firstSelected = filteredExplorerItems.find((it) => selectedPaths.has(it.path));
     if (!firstSelected) return;
 
-    if (firstSelected.kind === "image") {
+    if (firstSelected.kind === "image" || firstSelected.kind === "cad") {
       setAppMode("viewer");
       openPath(firstSelected.path);
     } else {
@@ -1388,7 +1569,7 @@ function App() {
         setLastClickedIndex(index);
       }
 
-      if (item.kind === "image") {
+      if (item.kind === "image" || item.kind === "cad") {
         loadDetails(item.path);
       }
     },
@@ -1398,7 +1579,7 @@ function App() {
   // 탐색기 그리드 더블클릭
   const handleExplorerItemDoubleClick = useCallback(
     (item: ExplorerItem) => {
-      if (item.kind === "image") {
+      if (item.kind === "image" || item.kind === "cad") {
         setAppMode("viewer");
         openPath(item.path);
       } else {
@@ -1573,7 +1754,7 @@ function App() {
     return () => window.removeEventListener("resize", syncFullscreen);
   }, []);
 
-  // 7단계: 컨텍스트 메뉴 외부 클릭 시 닫기
+  // 7단계: 컨텍스트 메뉴 외부 클릭 또는 창 크기 변경 시 닫기
   useEffect(() => {
     if (!contextMenu) return;
     const onMouseDownWindow = (e: MouseEvent) => {
@@ -1582,8 +1763,43 @@ function App() {
         setContextMenu(null);
       }
     };
+    const onResizeWindow = () => {
+      setContextMenu(null);
+    };
     window.addEventListener("mousedown", onMouseDownWindow);
-    return () => window.removeEventListener("mousedown", onMouseDownWindow);
+    window.addEventListener("resize", onResizeWindow);
+    return () => {
+      window.removeEventListener("mousedown", onMouseDownWindow);
+      window.removeEventListener("resize", onResizeWindow);
+    };
+  }, [contextMenu]);
+
+  // 7단계/버그수정: 화면 하단에서 우클릭 시 메뉴가 잘리지 않도록 위/아래 방향 및 위치 자동 보정
+  useLayoutEffect(() => {
+    if (!contextMenu || !contextMenuRef.current) return;
+    const el = contextMenuRef.current;
+    const rect = el.getBoundingClientRect();
+    const winW = window.innerWidth;
+    const winH = window.innerHeight;
+    const margin = 10;
+
+    // 아래쪽 공간이 부족하면 마우스 커서 위로 열기
+    const openUpwards = contextMenu.y + rect.height > winH - margin;
+    let top = openUpwards ? contextMenu.y - rect.height : contextMenu.y;
+    // 상하단 뷰포트 경계 벗어나지 않도록 보정
+    top = Math.max(margin, Math.min(top, winH - rect.height - margin));
+
+    // 오른쪽 공간이 부족하면 왼쪽으로 열기
+    const alignRight = contextMenu.x + rect.width > winW - margin;
+    let left = alignRight ? contextMenu.x - rect.width : contextMenu.x;
+    left = Math.max(margin, Math.min(left, winW - rect.width - margin));
+
+    el.style.left = `${left}px`;
+    el.style.top = `${top}px`;
+    el.style.visibility = "visible";
+    el.classList.toggle("open-upwards", openUpwards);
+    el.classList.toggle("align-right", alignRight);
+    el.style.transformOrigin = `${alignRight ? "right" : "left"} ${openUpwards ? "bottom" : "top"}`;
   }, [contextMenu]);
 
   // 탐색기에서 보기 (현재 보고 있는 파일 또는 상세정보 파일)
@@ -1642,19 +1858,50 @@ function App() {
   const executeSaveAs = useCallback(async () => {
     if (view.kind !== "image" || !view.path || !saveAsTargetPath) return;
     try {
-      const saved = await invoke<string>("save_image_advanced", {
-        sourcePath: view.path,
-        targetPath: saveAsTargetPath,
-        format: saveAsFormat,
-        quality: saveAsQuality,
-        rotation,
-        flipH,
-        flipV,
-        stripMetadata: saveAsStripMetadata,
-        stripAiPrompt: saveAsStripAiPrompt,
-        resizeWidth: saveAsResizeW && saveAsResizeW > 0 ? saveAsResizeW : null,
-        resizeHeight: saveAsResizeH && saveAsResizeH > 0 ? saveAsResizeH : null,
-      });
+      let saved: string;
+      const hasCropOrAdjust =
+        activeCrop !== null ||
+        activeAdjust.brightness !== 0 ||
+        activeAdjust.contrast !== 0 ||
+        activeAdjust.saturation !== 0 ||
+        activeAdjust.sharpness !== 0;
+
+      if (hasCropOrAdjust) {
+        saved = await invoke<string>("save_edited_advanced", {
+          sourcePath: view.path,
+          crop: activeCrop
+            ? {
+                x: activeCrop.x,
+                y: activeCrop.y,
+                width: activeCrop.width,
+                height: activeCrop.height,
+              }
+            : null,
+          adjust: activeAdjust,
+          rotation,
+          flipH,
+          flipV,
+          targetPath: saveAsTargetPath,
+        });
+        setActiveCrop(null);
+        setIsCropping(false);
+        setActiveAdjust({ brightness: 0, contrast: 0, saturation: 0, sharpness: 0 });
+        setLiveAdjust({ brightness: 0, contrast: 0, saturation: 0, sharpness: 0 });
+      } else {
+        saved = await invoke<string>("save_image_advanced", {
+          sourcePath: view.path,
+          targetPath: saveAsTargetPath,
+          format: saveAsFormat,
+          quality: saveAsQuality,
+          rotation,
+          flipH,
+          flipV,
+          stripMetadata: saveAsStripMetadata,
+          stripAiPrompt: saveAsStripAiPrompt,
+          resizeWidth: saveAsResizeW && saveAsResizeW > 0 ? saveAsResizeW : null,
+          resizeHeight: saveAsResizeH && saveAsResizeH > 0 ? saveAsResizeH : null,
+        });
+      }
       showToast(`저장 완료: ${baseName(saved)}`);
       setShowSaveAsModal(false);
     } catch (err) {
@@ -1672,6 +1919,8 @@ function App() {
     saveAsStripAiPrompt,
     saveAsResizeW,
     saveAsResizeH,
+    activeCrop,
+    activeAdjust,
     showToast,
   ]);
 
@@ -1783,6 +2032,11 @@ function App() {
             };
           }
         } else {
+          // 탐색기 모드에서 2개 이상 선택되어 있다면 일괄 이름 바꾸기 모달 즉시 실행
+          if (!target && selectedPaths.size > 1) {
+            setBatchModalState({ mode: "rename", paths: Array.from(selectedPaths) });
+            return;
+          }
           if (selectedPaths.size > 0 && explorerResult) {
             const firstSelectedPath = Array.from(selectedPaths)[0];
             const it = filteredExplorerItems.find((item) => item.path === firstSelectedPath);
@@ -2239,7 +2493,7 @@ function App() {
     });
   }, []);
 
-  // 7단계 & 8단계 & 9단계 & 10단계 (구조 정리): 모든 명령을 단일 목록(Command Registry)에 정의
+  // 7단계 & 8단계 & 9단계 & 10단계 & 14단계 (구조 정리): 모든 명령을 단일 목록(Command Registry)에 정의
   const commandState = useMemo(
     () => ({
       appMode,
@@ -2250,7 +2504,7 @@ function App() {
       showFilmstrip,
       showInfoPanel,
       isFullscreen,
-      canSaveCopy: view.kind === "image" && !view.isArchive && (rotation !== 0 || flipH || flipV),
+      canSaveCopy: view.kind === "image" && !view.isArchive && hasUnsavedEdits,
       canGoUp: Boolean(explorerResult?.parentPath),
       hasSelectedItems: selectedPaths.size > 0,
       isSlideshowActive,
@@ -2258,6 +2512,7 @@ function App() {
       isFlippedH: flipH,
       isFlippedV: flipV,
       canUndo: undoCount > 0,
+      isCropping,
     }),
     [
       appMode,
@@ -2267,7 +2522,7 @@ function App() {
       showFilmstrip,
       showInfoPanel,
       isFullscreen,
-      rotation,
+      hasUnsavedEdits,
       explorerResult?.parentPath,
       selectedPaths.size,
       isSlideshowActive,
@@ -2275,8 +2530,125 @@ function App() {
       flipH,
       flipV,
       undoCount,
+      isCropping,
     ]
   );
+
+  const handleCreateIdPhoto = useCallback(() => {
+    if (appMode === "viewer") {
+      if (view.kind === "image" && view.path) {
+        setIdPhotoTargetPaths([view.path]);
+      } else {
+        showToast("편집할 이미지가 없습니다.");
+      }
+    } else {
+      const imgPaths: string[] = [];
+      if (selectedPaths.size > 0) {
+        for (const p of selectedPaths) {
+          const ext = p.split(".").pop()?.toLowerCase() || "";
+          if (IMAGE_EXTENSIONS.includes(ext)) {
+            imgPaths.push(p);
+          }
+        }
+      }
+      if (imgPaths.length > 0) {
+        setIdPhotoTargetPaths(imgPaths);
+      } else {
+        showToast("선택된 이미지 파일이 없습니다.");
+      }
+    }
+  }, [appMode, view, selectedPaths, showToast]);
+
+  // 14단계 B: 일괄 작업 대상 파일 목록 추출 헬퍼
+  const getBatchEligiblePaths = useCallback(() => {
+    if (appMode === "viewer") {
+      if (view.kind === "image" && view.path) {
+        return [view.path];
+      }
+      return [];
+    } else {
+      const paths: string[] = [];
+      if (selectedPaths.size > 0) {
+        for (const p of selectedPaths) {
+          const ext = p.split(".").pop()?.toLowerCase() || "";
+          if (IMAGE_EXTENSIONS.includes(ext) || ext === "dwg" || ext === "dxf") {
+            paths.push(p);
+          }
+        }
+      }
+      return paths;
+    }
+  }, [appMode, view, selectedPaths]);
+
+  const handleOpenBatchConvert = useCallback(() => {
+    const paths = getBatchEligiblePaths();
+    if (paths.length === 0) {
+      showToast("작업할 이미지 파일을 선택해 주세요.");
+      return;
+    }
+    setBatchModalState({ mode: "convert", paths });
+  }, [getBatchEligiblePaths, showToast]);
+
+  const handleOpenBatchRename = useCallback(() => {
+    const paths = getBatchEligiblePaths();
+    if (paths.length === 0) {
+      showToast("이름을 변경할 파일을 선택해 주세요.");
+      return;
+    }
+    setBatchModalState({ mode: "rename", paths });
+  }, [getBatchEligiblePaths, showToast]);
+
+  const handleOpenBatchRotate = useCallback(() => {
+    const paths = getBatchEligiblePaths();
+    if (paths.length === 0) {
+      showToast("회전할 이미지 파일을 선택해 주세요.");
+      return;
+    }
+    setBatchModalState({ mode: "rotate", paths });
+  }, [getBatchEligiblePaths, showToast]);
+
+  // 14단계 C: 학교 행정실 사진 작업 핸들러
+  const handleOpenMosaicEditor = useCallback(() => {
+    if (appMode === "viewer") {
+      if (view.kind === "image" && view.path) {
+        setMosaicModalPath(view.path);
+      }
+    } else {
+      const paths = getBatchEligiblePaths();
+      if (paths.length > 0) {
+        setMosaicModalPath(paths[0]);
+      } else {
+        showToast("모자이크를 적용할 사진을 선택해 주세요.");
+      }
+    }
+  }, [appMode, view, getBatchEligiblePaths, showToast]);
+
+  const handleOpenPhotoCollage = useCallback(() => {
+    const paths = getBatchEligiblePaths();
+    if (paths.length < 2 || paths.length > 9) {
+      showToast("사진 합치기는 2장 이상 9장 이하의 사진을 선택해 주세요.");
+      return;
+    }
+    setPhotoCollagePaths(paths);
+  }, [getBatchEligiblePaths, showToast]);
+
+  const handleOpenPdfBinding = useCallback(() => {
+    const paths = getBatchEligiblePaths();
+    if (paths.length === 0) {
+      showToast("PDF로 묶을 사진을 선택해 주세요.");
+      return;
+    }
+    setPdfBindingPaths(paths);
+  }, [getBatchEligiblePaths, showToast]);
+
+  const handleOpenPhotoStamp = useCallback(() => {
+    const paths = getBatchEligiblePaths();
+    if (paths.length === 0) {
+      showToast("날짜·글자를 넣을 사진을 선택해 주세요.");
+      return;
+    }
+    setPhotoStampPaths(paths);
+  }, [getBatchEligiblePaths, showToast]);
 
   const commands = useMemo(
     () =>
@@ -2293,7 +2665,12 @@ function App() {
           zoomIn: () => zoomCenter(1.25),
           rotateCcw: () => handleRotate(270),
           rotateCw: () => handleRotate(90),
-          saveRotatedCopy,
+          saveRotatedCopy: () => {
+            if (hasUnsavedEdits) {
+              return handleSaveEditedCopy();
+            }
+            return saveRotatedCopy();
+          },
           requestDelete: () => {
             if (appMode === "viewer") {
               if (view.kind === "image" && view.path) setShowDeleteModal(true);
@@ -2325,6 +2702,7 @@ function App() {
           flipH: () => setFlipH((f) => !f),
           flipV: () => setFlipV((f) => !f),
           saveAs: () => openSaveAsModal(),
+          createIdPhoto: handleCreateIdPhoto,
           resizeImage: () => openResizeModal(),
           printImage: handlePrint,
           toggleSlideshow,
@@ -2343,6 +2721,26 @@ function App() {
           setWallpaper: () => void handleSetWallpaper("fill"),
           pasteClipboard: handleClipboardPaste,
           copyFiles: handleExplorerCopyFiles,
+          // 14단계 A 자르기 및 사진 보정 액션 바인딩
+          startCrop: () => {
+            if (view.kind === "image" && view.path) {
+              setIsCropping(true);
+            }
+          },
+          openAdjust: () => {
+            if (view.kind === "image" && view.path) {
+              setShowAdjustModal(true);
+            }
+          },
+          // 14단계 B 일괄 작업 액션 바인딩
+          openBatchConvert: handleOpenBatchConvert,
+          openBatchRename: handleOpenBatchRename,
+          openBatchRotate: handleOpenBatchRotate,
+          // 14단계 C 학교 행정실 사진 작업 액션 바인딩
+          openMosaicEditor: handleOpenMosaicEditor,
+          openPhotoCollage: handleOpenPhotoCollage,
+          openPdfBinding: handleOpenPdfBinding,
+          openPhotoStamp: handleOpenPhotoStamp,
         },
         commandState
       ),
@@ -2357,12 +2755,22 @@ function App() {
       zoomCenter,
       handleRotate,
       saveRotatedCopy,
+      handleSaveEditedCopy,
+      hasUnsavedEdits,
       appMode,
       view,
       selectedPaths.size,
       copyImageToClipboard,
       copyPathToClipboard,
       handleShowInFolder,
+      handleCreateIdPhoto,
+      handleOpenBatchConvert,
+      handleOpenBatchRename,
+      handleOpenBatchRotate,
+      handleOpenMosaicEditor,
+      handleOpenPhotoCollage,
+      handleOpenPdfBinding,
+      handleOpenPhotoStamp,
       cycleBgMode,
       loadDetails,
       toggleFullscreen,
@@ -2401,6 +2809,30 @@ function App() {
   // 키보드 단축키 (KeyboardEvent.code 기준 - 모두 명령 목록 commandsRef를 사용)
   useEffect(() => {
     const onKeyDown = (e: KeyboardEvent) => {
+      // 14단계 B: 일괄 작업 모달이 열려있을 때 전역 키 핸들러 비활성화 (Escape 시 닫기)
+      if (batchModalState !== null) {
+        if (e.code === "Escape") {
+          e.preventDefault();
+          setBatchModalState(null);
+        }
+        return;
+      }
+
+      // 증명사진 편집기가 열려있을 때는 전역 키 핸들러 비활성화
+      if (idPhotoTargetPaths !== null) {
+        return;
+      }
+
+      // 14단계 C: 학교 행정실 사진 작업 모달이 열려있을 때 전역 키 핸들러 비활성화
+      if (
+        mosaicModalPath !== null ||
+        photoCollagePaths !== null ||
+        pdfBindingPaths !== null ||
+        photoStampPaths !== null
+      ) {
+        return;
+      }
+
       // 1. 모달이 열려있을 때의 우선 키 처리
       if (showDeleteModal) {
         if (e.code === "Enter" || e.code === "NumpadEnter") {
@@ -3016,17 +3448,20 @@ function App() {
     if (appMode !== "explorer" || visibleExplorerItems.length === 0) return;
     for (const it of visibleExplorerItems) {
       if (
-        it.kind === "image" &&
+        (it.kind === "image" || it.kind === "cad") &&
         !explorerThumbnails[it.path] &&
         !loadingThumbsRef.current.has(it.path)
       ) {
         loadingThumbsRef.current.add(it.path);
-        invoke<string>("get_thumbnail", { path: it.path })
+        const invokeCmd = it.kind === "cad" ? "get_dwg_thumbnail" : "get_thumbnail";
+        invoke<string>(invokeCmd, { path: it.path })
           .then((thumbPath) => {
             setExplorerThumbnails((prev) => ({ ...prev, [it.path]: convertFileSrc(thumbPath) }));
           })
           .catch(() => {
-            setExplorerThumbnails((prev) => ({ ...prev, [it.path]: convertFileSrc(it.path) }));
+            if (it.kind !== "cad") {
+              setExplorerThumbnails((prev) => ({ ...prev, [it.path]: convertFileSrc(it.path) }));
+            }
           })
           .finally(() => {
             loadingThumbsRef.current.delete(it.path);
@@ -3304,6 +3739,7 @@ function App() {
                               aria-label={cmd.label}
                             >
                               {cmd.icon}
+                              <span className="toolbar-btn-label">{cmd.label}</span>
                             </button>
                             <button
                               className="glass-button toolbar-arrow-btn"
@@ -3331,6 +3767,7 @@ function App() {
                           aria-label={cmd.label}
                         >
                           {cmd.icon}
+                          <span className="toolbar-btn-label">{cmd.label}</span>
                         </button>
                       );
                     })}
@@ -3709,11 +4146,16 @@ function App() {
                                   alt={item.name}
                                   loading="lazy"
                                   onError={(e) => {
-                                    if (e.currentTarget.src !== convertFileSrc(item.path)) {
+                                    if (item.kind !== "cad" && e.currentTarget.src !== convertFileSrc(item.path)) {
                                       e.currentTarget.src = convertFileSrc(item.path);
                                     }
                                   }}
                                 />
+                              ) : item.kind === "cad" ? (
+                                <div style={{ display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", gap: "2px", color: "var(--accent)" }}>
+                                  <Sliders size={thumbnailSize * 0.4} />
+                                  <span style={{ fontSize: "10px", fontWeight: "bold" }}>CAD</span>
+                                </div>
                               ) : (
                                 <ImageIcon
                                   className="grid-img-placeholder"
@@ -3743,6 +4185,68 @@ function App() {
                       <>
                         <span className="status-sep" />
                         <span>선택됨 {selectedPaths.size}개</span>
+                        <div className="status-batch-actions">
+                          {selectedPaths.size === 1 && (
+                            <button
+                              type="button"
+                              className="status-batch-btn"
+                              onClick={handleOpenMosaicEditor}
+                              title="모자이크·흐림 개인정보 가리기 (Ctrl+M)"
+                            >
+                              모자이크
+                            </button>
+                          )}
+                          {selectedPaths.size >= 2 && selectedPaths.size <= 9 && (
+                            <button
+                              type="button"
+                              className="status-batch-btn highlight"
+                              onClick={handleOpenPhotoCollage}
+                              title="선택한 사진들을 한 장으로 합치기 (Ctrl+Alt+C)"
+                            >
+                              사진 합치기
+                            </button>
+                          )}
+                          <button
+                            type="button"
+                            className="status-batch-btn"
+                            onClick={handleOpenPdfBinding}
+                            title="선택 사진들을 하나의 A4 PDF 파일로 묶기 (Ctrl+Alt+P)"
+                          >
+                            PDF 묶기
+                          </button>
+                          <button
+                            type="button"
+                            className="status-batch-btn"
+                            onClick={handleOpenPhotoStamp}
+                            title="촬영 날짜·설명 글자 모서리 넣기 (Ctrl+Alt+T)"
+                          >
+                            날짜·글자
+                          </button>
+                          <button
+                            type="button"
+                            className="status-batch-btn"
+                            onClick={handleOpenBatchConvert}
+                            title="선택 항목 일괄 크기 조정·변환 (Ctrl+Shift+B)"
+                          >
+                            일괄 변환
+                          </button>
+                          <button
+                            type="button"
+                            className="status-batch-btn"
+                            onClick={handleOpenBatchRename}
+                            title="선택 항목 일괄 이름 바꾸기 (Ctrl+F2)"
+                          >
+                            일괄 이름
+                          </button>
+                          <button
+                            type="button"
+                            className="status-batch-btn"
+                            onClick={handleOpenBatchRotate}
+                            title="선택 항목 일괄 회전 (Ctrl+Shift+R)"
+                          >
+                            일괄 회전
+                          </button>
+                        </div>
                       </>
                     )}
                   </div>
@@ -3814,6 +4318,7 @@ function App() {
                               aria-label={cmd.label}
                             >
                               {cmd.icon}
+                              <span className="toolbar-btn-label">{cmd.label}</span>
                             </button>
                             <button
                               className="glass-button toolbar-arrow-btn"
@@ -3841,6 +4346,7 @@ function App() {
                           aria-label={cmd.label}
                         >
                           {cmd.icon}
+                          <span className="toolbar-btn-label">{cmd.label}</span>
                         </button>
                       );
                     })}
@@ -3951,6 +4457,9 @@ function App() {
               <span className="top-info-divider" aria-hidden="true" />
               <span className="top-info-filename">
                 {view.fileName}
+                {tiffPageInfo && ` [페이지 ${tiffPageInfo.currentPage + 1} / ${tiffPageInfo.totalPages}]`}
+                {activeCrop && ` [자르기: ${Math.round(activeCrop.width)}×${Math.round(activeCrop.height)}]`}
+                {activeAdjust && (activeAdjust.brightness !== 0 || activeAdjust.contrast !== 0 || activeAdjust.saturation !== 0 || activeAdjust.sharpness !== 0) && " [보정]"}
                 {rotation !== 0 && ` (${rotation}°)`}
                 {flipH && " [좌우반전]"}
                 {flipV && " [상하반전]"}
@@ -3958,8 +4467,18 @@ function App() {
             </aside>
           )}
 
-          {/* 이미지 렌더링 (단면 또는 양면) */}
-          {view.kind === "image" && !isDoublePage && (
+          {/* 13단계: CAD 도면 파일 (.dwg, .dxf) 전용 뷰어 렌더링 */}
+          {view.kind === "image" && isCadPath(view.path) && (
+            <CadViewer
+              filePath={view.path!}
+              showToast={showToast}
+              isWhiteBackground={settings.theme === "light"}
+              onToggleBg={cycleBgMode}
+            />
+          )}
+
+          {/* 이미지 렌더링 (단면) */}
+          {view.kind === "image" && !isCadPath(view.path) && !isDoublePage && (
             <img
               key={view.src}
               className={`viewer-image${loaded ? " is-loaded" : ""}${
@@ -3987,6 +4506,19 @@ function App() {
                       width: `${baseWidth}px`,
                       height: `${baseHeight}px`,
                       transform: `translate3d(${transform.x}px, ${transform.y}px, 0) scale(${transform.scale})${flipTransform} rotate(${rotation}deg)`,
+                      filter: liveAdjust
+                        ? `brightness(${100 + liveAdjust.brightness}%) contrast(${100 + liveAdjust.contrast}%) saturate(${100 + liveAdjust.saturation}%)`
+                        : undefined,
+                      ...(activeCrop && !isCropping && meta
+                        ? {
+                            clipPath: `polygon(
+                              ${(activeCrop.x / meta.naturalWidth) * 100}% ${(activeCrop.y / meta.naturalHeight) * 100}%,
+                              ${((activeCrop.x + activeCrop.width) / meta.naturalWidth) * 100}% ${(activeCrop.y / meta.naturalHeight) * 100}%,
+                              ${((activeCrop.x + activeCrop.width) / meta.naturalWidth) * 100}% ${((activeCrop.y + activeCrop.height) / meta.naturalHeight) * 100}%,
+                              ${(activeCrop.x / meta.naturalWidth) * 100}% ${((activeCrop.y + activeCrop.height) / meta.naturalHeight) * 100}%
+                            )`,
+                          }
+                        : {}),
                     }
                   : undefined
               }
@@ -3994,7 +4526,7 @@ function App() {
           )}
 
           {/* 5단계: 양면 보기 렌더링 */}
-          {view.kind === "image" && isDoublePage && (
+          {view.kind === "image" && !isCadPath(view.path) && isDoublePage && (
             <div
               className="double-view-container"
               style={{
@@ -4143,7 +4675,7 @@ function App() {
             </section>
           )}
 
-          {/* 7단계: 하단 상태바 */}
+          {/* 7단계 & 14단계: 하단 상태바 */}
           {settings.showStatusBar && view.kind === "image" && (
             <footer className="viewer-status-bar" aria-label="상태 표시줄">
               <div className="status-item">
@@ -4158,6 +4690,15 @@ function App() {
               <div className="status-item status-filename" title={view.fileName}>
                 <span className="status-val">{view.fileName}</span>
               </div>
+              {tiffPageInfo && (
+                <>
+                  <div className="status-sep" />
+                  <div className="status-item" style={{ color: "var(--accent)" }}>
+                    <span className="status-label">TIFF</span>
+                    <span className="status-val">{`페이지 ${tiffPageInfo.currentPage + 1} / ${tiffPageInfo.totalPages}`}</span>
+                  </div>
+                </>
+              )}
               {meta && (
                 <>
                   <div className="status-sep" />
@@ -4186,30 +4727,70 @@ function App() {
 
           {/* 뷰어 모드 우측 정보 패널 */}
           {renderInfoPanel()}
+
+          {/* 14단계 A: 자르기 오버레이 */}
+          {isCropping && meta && (
+            <CropOverlay
+              imageWidth={meta.naturalWidth}
+              imageHeight={meta.naturalHeight}
+              displayedRect={(() => {
+                const imgEl = viewerRef.current?.querySelector(".viewer-image");
+                if (imgEl) {
+                  const r = imgEl.getBoundingClientRect();
+                  return { left: r.left, top: r.top, width: r.width, height: r.height };
+                }
+                return { left: 0, top: 0, width: meta.naturalWidth, height: meta.naturalHeight };
+              })()}
+              onApplyCrop={(crop) => {
+                setActiveCrop(crop);
+                setIsCropping(false);
+                showToast(`자르기 적용됨 (${Math.round(crop.width)} × ${Math.round(crop.height)}px)`);
+              }}
+              onCancel={() => setIsCropping(false)}
+            />
+          )}
+
+          {/* 14단계 A: 간단 사진 보정 모달 패널 */}
+          {showAdjustModal && (
+            <AdjustModal
+              initialValues={activeAdjust}
+              onChange={(vals) => setLiveAdjust(vals)}
+              onApply={(vals) => {
+                setActiveAdjust(vals);
+                setLiveAdjust(vals);
+                setShowAdjustModal(false);
+                showToast("보정이 적용되었습니다. (Ctrl+S로 사본 저장)");
+              }}
+              onCancel={() => {
+                setLiveAdjust(activeAdjust);
+                setShowAdjustModal(false);
+              }}
+            />
+          )}
         </main>
       )}
 
       {/* 5단계 & 8단계: 파일 휴지통 삭제 확인 모달 */}
       {showDeleteModal && (
         <div className="modal-overlay" role="dialog" aria-modal="true">
-          <div className="modal-box">
-            <h3 className="modal-title">파일 삭제</h3>
+          <div className="modal-box text-center" style={{ maxWidth: "440px" }}>
+            <h3 className="modal-title" style={{ color: "var(--danger)" }}>파일 삭제</h3>
             <p className="modal-desc">
               {appMode === "viewer" ? (
                 <>
                   다음 파일을 휴지통으로 이동하시겠습니까?
                   <br />
-                  <strong style={{ display: "inline-block", marginTop: "6px" }}>
+                  <strong style={{ display: "inline-block", marginTop: "8px", wordBreak: "break-all", overflowWrap: "anywhere", color: "var(--fg)" }}>
                     {view.kind === "image" && view.fileName}
                   </strong>
                 </>
               ) : (
                 <>
-                  선택한 <strong>{selectedPaths.size}개 항목</strong>을 휴지통으로 이동하시겠습니까?
+                  선택한 <strong style={{ color: "var(--accent)" }}>{selectedPaths.size}개 항목</strong>을 휴지통으로 이동하시겠습니까?
                 </>
               )}
             </p>
-            <div className="modal-buttons">
+            <div className="modal-buttons" style={{ justifyContent: "center" }}>
               <button className="glass-button" onClick={() => setShowDeleteModal(false)}>
                 취소 (Esc)
               </button>
@@ -4395,6 +4976,34 @@ function App() {
                     </div>
                   </div>
 
+                  {/* 13단계: CAD 도면 파일 (.dwg, .dxf) 연결 */}
+                  <div className="setting-group">
+                    <label className="setting-label">CAD 도면 파일 (.dwg, .dxf) 연결</label>
+                    <div className="setting-checkbox-row">
+                      <label className="checkbox-container">
+                        <input
+                          type="checkbox"
+                          checked={Boolean(settings.cadFileAssociation)}
+                          onChange={(e) => {
+                            const checked = e.target.checked;
+                            void updateSettings({ cadFileAssociation: checked });
+                            invoke("set_cad_file_association", { enabled: checked })
+                              .then(() => {
+                                showToast(checked ? "CAD 파일 연결이 설정되었습니다." : "CAD 파일 연결이 해제되었습니다.");
+                              })
+                              .catch((err) => {
+                                showToast(`CAD 연결 설정 실패: ${String(err)}`);
+                              });
+                          }}
+                        />
+                        <span className="checkbox-text">DWG, DXF 도면 파일을 k-boda로 열기 (기본값: 해제)</span>
+                      </label>
+                    </div>
+                    <p className="setting-hint">
+                      설정 시 Windows 탐색기에서 .dwg 및 .dxf 파일을 더블클릭하면 k-boda CAD 뷰어로 즉시 열립니다.
+                    </p>
+                  </div>
+
                   {/* 10단계: 외부 편집기 프로그램 관리 */}
                   <div className="setting-group">
                     <label className="setting-label">외부 편집기 프로그램 등록</label>
@@ -4423,39 +5032,43 @@ function App() {
                         ))
                       )}
                     </div>
-                    <div className="external-editor-add-form" style={{ marginTop: "10px", display: "flex", gap: "6px" }}>
-                      <input
-                        type="text"
-                        className="modal-input"
-                        placeholder="프로그램 이름 (예: Photoshop)"
-                        value={newEditorName}
-                        onChange={(e) => setNewEditorName(e.target.value)}
-                        style={{ width: "150px" }}
-                      />
-                      <input
-                        type="text"
-                        className="modal-input"
-                        placeholder="실행 파일 경로 (.exe)"
-                        value={newEditorPath}
-                        onChange={(e) => setNewEditorPath(e.target.value)}
-                        style={{ flex: 1 }}
-                      />
-                      <button
-                        type="button"
-                        className="glass-button"
-                        onClick={handleBrowseEditorPath}
-                        style={{ padding: "6px 10px", whiteSpace: "nowrap" }}
-                      >
-                        찾기...
-                      </button>
-                      <button
-                        type="button"
-                        className="glass-button btn-primary"
-                        onClick={handleAddExternalEditor}
-                        style={{ padding: "6px 12px", whiteSpace: "nowrap" }}
-                      >
-                        추가
-                      </button>
+                    <div className="external-editor-add-form" style={{ marginTop: "10px", display: "flex", flexDirection: "column", gap: "8px" }}>
+                      <div style={{ display: "flex", gap: "6px" }}>
+                        <input
+                          type="text"
+                          className="modal-input"
+                          placeholder="프로그램 이름 (예: Photoshop)"
+                          value={newEditorName}
+                          onChange={(e) => setNewEditorName(e.target.value)}
+                          style={{ flex: 1 }}
+                        />
+                        <button
+                          type="button"
+                          className="glass-button btn-primary"
+                          onClick={handleAddExternalEditor}
+                          style={{ padding: "6px 14px", whiteSpace: "nowrap" }}
+                        >
+                          추가
+                        </button>
+                      </div>
+                      <div style={{ display: "flex", gap: "6px" }}>
+                        <input
+                          type="text"
+                          className="modal-input"
+                          placeholder="실행 파일 경로 (.exe)"
+                          value={newEditorPath}
+                          onChange={(e) => setNewEditorPath(e.target.value)}
+                          style={{ flex: 1 }}
+                        />
+                        <button
+                          type="button"
+                          className="glass-button"
+                          onClick={handleBrowseEditorPath}
+                          style={{ padding: "6px 12px", whiteSpace: "nowrap" }}
+                        >
+                          찾기...
+                        </button>
+                      </div>
                     </div>
                   </div>
                 </>
@@ -4621,7 +5234,7 @@ function App() {
             if (e.target === e.currentTarget) setShowSaveAsModal(false);
           }}
         >
-          <div className="modal-box" style={{ maxWidth: "480px" }}>
+          <div className="modal-box" style={{ maxWidth: "520px", width: "94vw" }}>
             <div className="modal-header">
               <h3 className="modal-title">다른 이름으로 저장</h3>
               <button className="modal-close-btn" onClick={() => setShowSaveAsModal(false)} title="닫기 (Esc)">
@@ -4761,7 +5374,7 @@ function App() {
             if (e.target === e.currentTarget) setShowResizeModal(false);
           }}
         >
-          <div className="modal-box" style={{ maxWidth: "420px" }}>
+          <div className="modal-box" style={{ maxWidth: "460px", width: "94vw" }}>
             <div className="modal-header">
               <h3 className="modal-title">이미지 크기 조정</h3>
               <button className="modal-close-btn" onClick={() => setShowResizeModal(false)} title="닫기 (Esc)">
@@ -5004,6 +5617,17 @@ function App() {
                   </div>
                 );
               })}
+              <div className="help-section" style={{ marginTop: "16px", padding: "10px", background: "rgba(255, 255, 255, 0.04)", borderRadius: "8px", fontSize: "11.5px", lineHeight: "1.6", color: "var(--fg-dim)" }}>
+                <h4 className="help-section-title" style={{ fontSize: "12px", marginBottom: "6px" }}>오픈소스 라이선스 및 도면(CAD) 뷰어 정보</h4>
+                <p>
+                  <strong>• LibreDWG 0.14:</strong> GNU General Public License v3.0 이상 (GPLv3+). 독립 실행 파일(sidecar) 방식으로 프로세스 분리 실행되며, AutoCAD R1.1 ~ 2024(R31) DWG 형식을 지원합니다.
+                  <br />
+                  소스 코드 및 프로젝트: <span style={{ color: "var(--accent)" }}>https://www.gnu.org/software/libredwg/</span>
+                </p>
+                <p style={{ marginTop: "4px" }}>
+                  <strong>• dxf-parser:</strong> MIT License (<span style={{ color: "var(--accent)" }}>https://github.com/gdsestimating/dxf-parser</span>)
+                </p>
+              </div>
             </div>
 
             <div className="modal-buttons">
@@ -5202,10 +5826,12 @@ function App() {
       {/* 7단계: 우클릭 컨텍스트 메뉴 */}
       {contextMenu && (
         <div
+          ref={contextMenuRef}
           className="context-menu"
           style={{
-            left: `${Math.min(contextMenu.x, window.innerWidth - 220)}px`,
-            top: `${Math.min(contextMenu.y, window.innerHeight - 360)}px`,
+            left: `${contextMenu.x}px`,
+            top: `${contextMenu.y}px`,
+            visibility: "hidden",
           }}
           role="menu"
         >
@@ -5332,6 +5958,144 @@ function App() {
       {draggingFile && (
         <div className="drop-overlay" aria-hidden="true">
           <div className="drop-box">여기에 놓으면 열립니다 (이미지 또는 ZIP/CBZ)</div>
+        </div>
+      )}
+
+      {/* 증명사진 만들기 에디터 */}
+      {idPhotoTargetPaths && idPhotoTargetPaths.length > 0 && (
+        <IdPhotoEditor
+          initialPaths={idPhotoTargetPaths}
+          onClose={() => setIdPhotoTargetPaths(null)}
+          showToast={showToast}
+          initialSaveDir={settings.lastFolder}
+          onUpdateSaveDir={(dir) => {
+            void updateSettings({ lastFolder: dir });
+          }}
+        />
+      )}
+
+      {/* 14단계 B: 일괄 작업 (크기 조정·변환, 이름 바꾸기, 회전) 모달 */}
+      {batchModalState && batchModalState.paths.length > 0 && (
+        <BatchProcessingModal
+          initialMode={batchModalState.mode}
+          targetPaths={batchModalState.paths}
+          onClose={() => setBatchModalState(null)}
+          showToast={showToast}
+          onRefreshExplorer={refreshExplorer}
+          onUndoAdded={() => setUndoCount((c) => Math.min(20, c + 1))}
+        />
+      )}
+
+      {/* 14단계 C: 모자이크·흐림 개인정보 가리기 모달 */}
+      {mosaicModalPath && (
+        <MosaicEditorModal
+          imagePath={mosaicModalPath}
+          onClose={() => setMosaicModalPath(null)}
+          showToast={showToast}
+          onSaved={() => refreshExplorer()}
+        />
+      )}
+
+      {/* 14단계 C: 사진 합치기 (활동·증빙사진) 모달 */}
+      {photoCollagePaths && photoCollagePaths.length > 0 && (
+        <PhotoCollageModal
+          targetPaths={photoCollagePaths}
+          onClose={() => setPhotoCollagePaths(null)}
+          showToast={showToast}
+          onRefreshExplorer={refreshExplorer}
+        />
+      )}
+
+      {/* 14단계 C: PDF 한 파일로 묶기 모달 */}
+      {pdfBindingPaths && pdfBindingPaths.length > 0 && (
+        <PdfBindingModal
+          targetPaths={pdfBindingPaths}
+          onClose={() => setPdfBindingPaths(null)}
+          showToast={showToast}
+          onRefreshExplorer={refreshExplorer}
+        />
+      )}
+
+      {/* 14단계 C: 날짜·글자 넣기 (공사 사진 대지 등) 모달 */}
+      {photoStampPaths && photoStampPaths.length > 0 && (
+        <PhotoStampModal
+          targetPaths={photoStampPaths}
+          onClose={() => setPhotoStampPaths(null)}
+          showToast={showToast}
+          onRefreshExplorer={refreshExplorer}
+        />
+      )}
+
+      {/* 14단계 A: HEIC 코덱 미설치 안내 모달 */}
+      {heicCodecMissing && (
+        <div className="modal-overlay" role="dialog" aria-modal="true">
+          <div className="modal-box" style={{ maxWidth: "440px" }}>
+            <h3 className="modal-title" style={{ color: "var(--accent)" }}>HEIF 이미지 확장 설치 필요</h3>
+            <p className="modal-desc" style={{ lineHeight: "1.6", marginTop: "8px" }}>
+              아이폰 사진(.heic, .heif)을 열려면 Windows에 HEIF 이미지 확장이 설치되어 있어야 합니다.
+              <br /><br />
+              Microsoft Store에서 공식 HEIF 이미지 확장을 설치하세요.
+            </p>
+            <div className="modal-buttons" style={{ marginTop: "16px" }}>
+              <button className="glass-button" onClick={() => setHeicCodecMissing(false)}>
+                닫기
+              </button>
+              <button
+                className="glass-button btn-primary"
+                onClick={() => {
+                  window.open("ms-windows-store://pdp/?ProductId=9pmmsr1c69ky", "_blank");
+                }}
+              >
+                Microsoft Store에서 설치
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* 14단계 A: 저장하지 않은 변경 확인 모달 */}
+      {pendingNavigate && (
+        <div className="modal-overlay" role="dialog" aria-modal="true">
+          <div className="modal-box" style={{ maxWidth: "420px" }}>
+            <h3 className="modal-title">저장하지 않은 변경 사항</h3>
+            <p className="modal-desc" style={{ lineHeight: "1.6", marginTop: "8px" }}>
+              자르기, 보정 또는 회전/반전 등의 편집 내용이 저장되지 않았습니다.
+              <br />
+              다른 이미지로 이동하시겠습니까?
+            </p>
+            <div className="modal-buttons" style={{ flexDirection: "column", gap: "8px", marginTop: "16px" }}>
+              <button
+                className="glass-button btn-primary"
+                style={{ width: "100%" }}
+                onClick={async () => {
+                  await handleSaveEditedCopy();
+                  const act = pendingNavigate;
+                  setPendingNavigate(null);
+                  act();
+                }}
+              >
+                사본으로 저장하고 이동 (Ctrl+S)
+              </button>
+              <button
+                className="glass-button"
+                style={{ width: "100%" }}
+                onClick={() => {
+                  const act = pendingNavigate;
+                  setPendingNavigate(null);
+                  act();
+                }}
+              >
+                저장하지 않고 이동
+              </button>
+              <button
+                className="glass-button"
+                style={{ width: "100%", opacity: 0.8 }}
+                onClick={() => setPendingNavigate(null)}
+              >
+                취소 (편집 계속)
+              </button>
+            </div>
+          </div>
         </div>
       )}
     </div>

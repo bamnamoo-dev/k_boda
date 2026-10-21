@@ -42,6 +42,12 @@ import {
   Palette,
   Monitor,
   ClipboardPaste,
+  UserCheck,
+  Layers,
+  Stamp,
+  LayoutGrid,
+  Crop,
+  SlidersHorizontal,
 } from "lucide-react";
 
 export type CommandId =
@@ -60,6 +66,7 @@ export type CommandId =
   | "flipV"
   | "saveCopy"
   | "saveAs"
+  | "idPhoto"
   | "resizeImage"
   | "printImage"
   | "delete"
@@ -88,7 +95,19 @@ export type CommandId =
   | "openExternalEditor"
   | "setWallpaper"
   | "pasteClipboard"
-  | "copyFiles";
+  | "copyFiles"
+  // 14단계 A 자르기 및 보정 명령
+  | "crop"
+  | "adjust"
+  // 14단계 B 일괄 작업 명령
+  | "batchConvert"
+  | "batchRename"
+  | "batchRotate"
+  // 14단계 C 학교 행정실 사진 작업 명령
+  | "mosaic"
+  | "photoCollage"
+  | "pdfBinding"
+  | "photoStamp";
 
 export type ShortcutTrigger = {
   code: string; // KeyboardEvent.code 기준 (e.g. "KeyO", "ArrowRight")
@@ -150,6 +169,7 @@ export type CommandActions = {
   flipH?: () => void;
   flipV?: () => void;
   saveAs?: () => void;
+  createIdPhoto?: () => void;
   resizeImage?: () => void;
   printImage?: () => void;
   toggleSlideshow?: () => void;
@@ -165,6 +185,18 @@ export type CommandActions = {
   setWallpaper?: () => void;
   pasteClipboard?: () => void;
   copyFiles?: () => void;
+  // 14단계 A 자르기 및 보정 액션
+  startCrop?: () => void;
+  openAdjust?: () => void;
+  // 14단계 B 일괄 작업 액션
+  openBatchConvert?: () => void;
+  openBatchRename?: () => void;
+  openBatchRotate?: () => void;
+  // 14단계 C 학교 행정실 사진 작업 액션
+  openMosaicEditor?: () => void;
+  openPhotoCollage?: () => void;
+  openPdfBinding?: () => void;
+  openPhotoStamp?: () => void;
 };
 
 export type CommandState = {
@@ -186,13 +218,15 @@ export type CommandState = {
   isFlippedV?: boolean;
   // 10단계 새 상태
   canUndo?: boolean;
+  // 14단계 A 상태
+  isCropping?: boolean;
 };
 
 /**
  * 모든 단축키, 상단 툴바, 우클릭 메뉴, 도움말 표에서 단일 진실 공급원(Single Source of Truth)으로 사용되는 명령 목록을 생성합니다.
  */
 export function buildCommands(actions: CommandActions, state: CommandState): AppCommand[] {
-  const iconSize = 18;
+  const iconSize = 21;
 
   return [
     {
@@ -326,7 +360,7 @@ export function buildCommands(actions: CommandActions, state: CommandState): App
     },
     {
       id: "saveCopy",
-      label: "사본으로 저장",
+      label: "사본 저장",
       icon: <Save size={iconSize} />,
       shortcutDisplay: "Ctrl+S",
       triggers: [{ code: "KeyS", ctrl: true }],
@@ -533,7 +567,7 @@ export function buildCommands(actions: CommandActions, state: CommandState): App
     },
     {
       id: "saveAs",
-      label: "다른 이름으로 저장",
+      label: "다른 이름",
       icon: <SaveAll size={iconSize} />,
       shortcutDisplay: "Ctrl+Shift+S",
       triggers: [{ code: "KeyS", ctrl: true, shift: true }],
@@ -541,6 +575,20 @@ export function buildCommands(actions: CommandActions, state: CommandState): App
       isEnabled: state.appMode === "viewer" && state.hasImage && !state.isArchive,
       category: "보기 모드 및 편집",
       scope: "viewer",
+    },
+    {
+      id: "idPhoto",
+      label: "증명사진",
+      icon: <UserCheck size={iconSize} />,
+      shortcutDisplay: "Shift+P",
+      triggers: [{ code: "KeyP", shift: true }],
+      action: () => actions.createIdPhoto?.(),
+      isEnabled:
+        state.appMode === "viewer"
+          ? state.hasImage && !state.isArchive
+          : Boolean(state.hasSelectedItems),
+      category: "보기 모드 및 편집",
+      scope: "all",
     },
     {
       id: "resizeImage",
@@ -709,6 +757,120 @@ export function buildCommands(actions: CommandActions, state: CommandState): App
       category: "파일 및 부가 기능",
       scope: "all",
     },
+    // 14단계 B: 일괄 작업 명령들
+    {
+      id: "batchConvert",
+      label: "일괄 크기 조정·변환",
+      icon: <Layers size={iconSize} />,
+      shortcutDisplay: "Ctrl+Shift+B",
+      triggers: [{ code: "KeyB", ctrl: true, shift: true }],
+      action: () => actions.openBatchConvert?.(),
+      isEnabled:
+        state.appMode === "explorer"
+          ? Boolean(state.hasSelectedItems)
+          : state.hasImage && !state.isArchive,
+      category: "파일 및 부가 기능",
+      scope: "all",
+    },
+    {
+      id: "batchRename",
+      label: "일괄 이름 바꾸기",
+      icon: <PenLine size={iconSize} />,
+      shortcutDisplay: "Ctrl+F2",
+      triggers: [{ code: "F2", ctrl: true }],
+      action: () => actions.openBatchRename?.(),
+      isEnabled:
+        state.appMode === "explorer"
+          ? Boolean(state.hasSelectedItems)
+          : state.hasImage && !state.isArchive,
+      category: "파일 및 부가 기능",
+      scope: "all",
+    },
+    {
+      id: "batchRotate",
+      label: "일괄 회전",
+      icon: <RotateCw size={iconSize} />,
+      shortcutDisplay: "Ctrl+Shift+R",
+      triggers: [{ code: "KeyR", ctrl: true, shift: true }],
+      action: () => actions.openBatchRotate?.(),
+      isEnabled:
+        state.appMode === "explorer"
+          ? Boolean(state.hasSelectedItems)
+          : state.hasImage && !state.isArchive,
+      category: "파일 및 부가 기능",
+      scope: "all",
+    },
+    {
+      id: "mosaic",
+      label: "모자이크·흐림",
+      icon: <Eye size={iconSize} />,
+      shortcutDisplay: "Ctrl+M",
+      triggers: [{ code: "KeyM", ctrl: true }],
+      action: () => actions.openMosaicEditor?.(),
+      isEnabled:
+        (state.appMode === "explorer" ? Boolean(state.hasSelectedItems) : state.hasImage) &&
+        !state.isArchive,
+      category: "보기 모드 및 편집",
+      scope: "all",
+    },
+    {
+      id: "photoCollage",
+      label: "사진 합치기",
+      icon: <LayoutGrid size={iconSize} />,
+      shortcutDisplay: "Ctrl+Alt+C",
+      triggers: [{ code: "KeyC", ctrl: true, alt: true }],
+      action: () => actions.openPhotoCollage?.(),
+      isEnabled: state.appMode === "explorer" && Boolean(state.hasSelectedItems),
+      category: "파일 및 부가 기능",
+      scope: "explorer",
+    },
+    {
+      id: "pdfBinding",
+      label: "PDF 묶기",
+      icon: <FileText size={iconSize} />,
+      shortcutDisplay: "Ctrl+Alt+P",
+      triggers: [{ code: "KeyP", ctrl: true, alt: true }],
+      action: () => actions.openPdfBinding?.(),
+      isEnabled: state.appMode === "explorer" && Boolean(state.hasSelectedItems),
+      category: "파일 및 부가 기능",
+      scope: "explorer",
+    },
+    {
+      id: "photoStamp",
+      label: "날짜·글자",
+      icon: <Stamp size={iconSize} />,
+      shortcutDisplay: "Ctrl+Alt+T",
+      triggers: [{ code: "KeyT", ctrl: true, alt: true }],
+      action: () => actions.openPhotoStamp?.(),
+      isEnabled:
+        (state.appMode === "explorer" ? Boolean(state.hasSelectedItems) : state.hasImage) &&
+        !state.isArchive,
+      category: "보기 모드 및 편집",
+      scope: "all",
+    },
+    {
+      id: "crop",
+      label: "자르기",
+      icon: <Crop size={iconSize} />,
+      shortcutDisplay: "Shift+X",
+      triggers: [{ code: "KeyX", shift: true }],
+      action: () => actions.startCrop?.(),
+      isEnabled: state.appMode === "viewer" && state.hasImage && !state.isArchive,
+      isActive: Boolean(state.isCropping),
+      category: "보기 모드 및 편집",
+      scope: "viewer",
+    },
+    {
+      id: "adjust",
+      label: "사진 보정",
+      icon: <SlidersHorizontal size={iconSize} />,
+      shortcutDisplay: "Shift+E",
+      triggers: [{ code: "KeyE", shift: true }],
+      action: () => actions.openAdjust?.(),
+      isEnabled: state.appMode === "viewer" && state.hasImage && !state.isArchive,
+      category: "보기 모드 및 편집",
+      scope: "viewer",
+    },
   ];
 }
 
@@ -718,7 +880,7 @@ export const TOOLBAR_GROUPS_VIEWER: CommandId[][] = [
   ["prev", "next"],
   ["fit", "actualSize", "zoomOut", "zoomIn", "toggleInterpolation"],
   ["rotateCcw", "rotateCw", "flipH", "flipV"],
-  ["saveCopy", "saveAs", "resizeImage", "printImage", "rename", "delete", "undo"],
+  ["saveCopy", "saveAs", "crop", "adjust", "mosaic", "photoStamp", "idPhoto", "resizeImage", "printImage", "rename", "delete", "undo"],
   ["toggleSlideshow", "toggleDoublePage", "toggleFilmstrip", "toggleInfo", "sortMenu"],
   ["toggleFullscreen", "openSettings"],
 ];
@@ -727,7 +889,8 @@ export const TOOLBAR_GROUPS_VIEWER: CommandId[][] = [
 export const TOOLBAR_GROUPS_EXPLORER: CommandId[][] = [
   ["open", "pasteClipboard"],
   ["explorerUp", "explorerRefresh", "sortMenu"],
-  ["openViewer"],
+  ["openViewer", "mosaic", "photoStamp", "idPhoto"],
+  ["batchConvert", "batchRename", "batchRotate", "photoCollage", "pdfBinding"],
   ["newFolder", "rename", "copyToFolder", "moveToFolder", "delete", "undo"],
   ["toggleInfo"],
   ["toggleFullscreen", "openSettings"],
@@ -741,7 +904,8 @@ export const CONTEXT_MENU_GROUPS: CommandId[][] = [
   ["open", "pasteClipboard"],
   ["copyImage", "copyFiles", "copyPath", "showInFolder"],
   ["rotateCcw", "rotateCw", "flipH", "flipV"],
-  ["saveCopy", "saveAs", "resizeImage", "printImage"],
+  ["saveCopy", "saveAs", "crop", "adjust", "mosaic", "photoStamp", "idPhoto", "resizeImage", "printImage"],
+  ["batchConvert", "batchRename", "batchRotate", "photoCollage", "pdfBinding"],
   ["rename", "copyToFolder", "moveToFolder", "delete", "undo"],
   ["openExternalEditor", "setWallpaper"],
   ["toggleSlideshow", "sortMenu"],

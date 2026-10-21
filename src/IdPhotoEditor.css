@@ -1,0 +1,427 @@
+/* 증명사진 만들기 에디터 스타일 */
+.id-photo-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 9999;
+  display: flex;
+  flex-direction: column;
+  background-color: #121418;
+  color: #f1f3f5;
+  user-select: none;
+  overflow: hidden;
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Malgun Gothic", sans-serif;
+}
+
+/* 상단 헤더 툴바 */
+.id-photo-header {
+  height: 52px;
+  background: rgba(22, 25, 31, 0.95);
+  backdrop-filter: blur(12px);
+  border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0 16px;
+  gap: 12px;
+  flex-shrink: 0;
+}
+
+.id-photo-title-area {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.id-photo-badge {
+  background: #3b82f6;
+  color: #fff;
+  font-size: 11px;
+  font-weight: 700;
+  padding: 2px 7px;
+  border-radius: 4px;
+  letter-spacing: 0.5px;
+}
+
+.id-photo-batch-badge {
+  background: #8b5cf6;
+  color: #fff;
+  font-size: 12px;
+  font-weight: 600;
+  padding: 3px 8px;
+  border-radius: 12px;
+}
+
+.id-photo-title {
+  font-size: 15px;
+  font-weight: 600;
+  color: #f8fafc;
+}
+
+.id-photo-header-controls {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+/* 메인 작업 영역: 좌측 캔버스 뷰포트 + 우측 조작 패널 */
+.id-photo-main {
+  flex: 1;
+  display: flex;
+  position: relative;
+  overflow: hidden;
+}
+
+/* 캔버스 뷰포트 */
+.id-photo-viewport {
+  flex: 1;
+  position: relative;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: #090a0c;
+  overflow: hidden;
+  cursor: grab;
+}
+
+.id-photo-viewport.is-dragging {
+  cursor: grabbing;
+}
+
+/* 회전 및 위치 변환 컨테이너 */
+.id-photo-image-wrapper {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  transform-origin: center center;
+  pointer-events: none;
+}
+
+.id-photo-image {
+  display: block;
+  max-width: none;
+  max-height: none;
+  pointer-events: none;
+  transform: translate(-50%, -50%);
+}
+
+/* 어두운 마스크 오버레이 및 자르기 틀 */
+.id-photo-mask-svg {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  pointer-events: none;
+  z-index: 10;
+}
+
+/* 자르기 틀 테두리 */
+.id-photo-crop-border {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+  border: 2px solid #3b82f6;
+  box-shadow: 0 0 0 1px rgba(0, 0, 0, 0.5), inset 0 0 0 1px rgba(255, 255, 255, 0.3);
+  pointer-events: none;
+  z-index: 20;
+}
+
+/* 가이드선 컨테이너 */
+.id-photo-guides {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  overflow: hidden;
+}
+
+.id-photo-guide-line {
+  position: absolute;
+  left: 0;
+  right: 0;
+  height: 1px;
+  background: rgba(56, 189, 248, 0.7);
+  box-shadow: 0 0 2px rgba(0, 0, 0, 0.8);
+}
+
+.id-photo-guide-line.v-center {
+  left: 50%;
+  right: auto;
+  top: 0;
+  bottom: 0;
+  width: 1px;
+  height: 100%;
+  background: rgba(56, 189, 248, 0.5);
+  border-left: 1px dashed rgba(56, 189, 248, 0.6);
+}
+
+.id-photo-guide-label {
+  position: absolute;
+  left: 4px;
+  top: -14px;
+  font-size: 10px;
+  color: #38bdf8;
+  background: rgba(15, 23, 42, 0.85);
+  padding: 1px 4px;
+  border-radius: 2px;
+  pointer-events: none;
+}
+
+/* 얼굴 가이드 타원 */
+.id-photo-guide-oval {
+  position: absolute;
+  border: 1.5px dashed rgba(56, 189, 248, 0.75);
+  border-radius: 50%;
+  pointer-events: none;
+  box-shadow: 0 0 4px rgba(0, 0, 0, 0.5);
+}
+
+/* 뷰포트 하단 플로팅 컨트롤 (줌 슬라이더 등) */
+.id-photo-floating-bar {
+  position: absolute;
+  bottom: 20px;
+  left: 50%;
+  transform: translateX(-50%);
+  background: rgba(18, 22, 28, 0.85);
+  backdrop-filter: blur(8px);
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  border-radius: 24px;
+  padding: 6px 16px;
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  z-index: 30;
+  box-shadow: 0 6px 20px rgba(0, 0, 0, 0.4);
+}
+
+/* 해상도 경고 배지 */
+.id-photo-res-warning {
+  position: absolute;
+  top: 16px;
+  left: 50%;
+  transform: translateX(-50%);
+  background: rgba(245, 158, 11, 0.95);
+  color: #000;
+  font-size: 12px;
+  font-weight: 600;
+  padding: 6px 14px;
+  border-radius: 20px;
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.35);
+  z-index: 30;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  animation: pulse-warn 2s infinite;
+}
+
+@keyframes pulse-warn {
+  0%, 100% { opacity: 0.95; transform: translateX(-50%) scale(1); }
+  50% { opacity: 1; transform: translateX(-50%) scale(1.02); }
+}
+
+/* 우측 사이드 패널 */
+.id-photo-sidebar {
+  width: 320px;
+  background: #181b21;
+  border-left: 1px solid rgba(255, 255, 255, 0.08);
+  display: flex;
+  flex-direction: column;
+  overflow-y: auto;
+  flex-shrink: 0;
+  z-index: 40;
+}
+
+.id-photo-sidebar-section {
+  padding: 16px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.id-photo-section-title {
+  font-size: 13px;
+  font-weight: 700;
+  color: #cbd5e1;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.id-photo-preset-select {
+  width: 100%;
+  background: #232730;
+  color: #f1f5f9;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  padding: 8px 10px;
+  border-radius: 6px;
+  font-size: 13px;
+  outline: none;
+  cursor: pointer;
+}
+
+.id-photo-preset-select:focus {
+  border-color: #3b82f6;
+}
+
+.id-photo-preset-desc {
+  font-size: 11px;
+  color: #94a3b8;
+  line-height: 1.4;
+  background: rgba(0, 0, 0, 0.2);
+  padding: 8px 10px;
+  border-radius: 6px;
+}
+
+/* 슬라이더 행 */
+.id-photo-slider-row {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.id-photo-slider-label {
+  display: flex;
+  justify-content: space-between;
+  font-size: 12px;
+  color: #94a3b8;
+}
+
+.id-photo-slider {
+  width: 100%;
+  height: 4px;
+  border-radius: 2px;
+  background: #334155;
+  accent-color: #3b82f6;
+  outline: none;
+  cursor: pointer;
+}
+
+/* 버튼 스타일 */
+.id-photo-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  padding: 7px 12px;
+  border-radius: 6px;
+  font-size: 12px;
+  font-weight: 500;
+  cursor: pointer;
+  border: 1px solid transparent;
+  transition: all 0.15s ease;
+  user-select: none;
+}
+
+.id-photo-btn-primary {
+  background: #2563eb;
+  color: #ffffff;
+}
+
+.id-photo-btn-primary:hover:not(:disabled) {
+  background: #1d4ed8;
+}
+
+.id-photo-btn-success {
+  background: #16a34a;
+  color: #ffffff;
+}
+
+.id-photo-btn-success:hover:not(:disabled) {
+  background: #15803d;
+}
+
+.id-photo-btn-secondary {
+  background: #2d333f;
+  color: #e2e8f0;
+  border-color: rgba(255, 255, 255, 0.08);
+}
+
+.id-photo-btn-secondary:hover:not(:disabled) {
+  background: #3b4252;
+}
+
+.id-photo-btn:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+/* 이름 입력칸 */
+.id-photo-input {
+  width: 100%;
+  background: #232730;
+  color: #f1f5f9;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  padding: 7px 10px;
+  border-radius: 6px;
+  font-size: 12px;
+  outline: none;
+  box-sizing: border-box;
+}
+
+.id-photo-input:focus {
+  border-color: #3b82f6;
+}
+
+/* 검증 결과 배지 */
+.id-photo-result-box {
+  padding: 10px 12px;
+  border-radius: 6px;
+  font-size: 12px;
+  line-height: 1.4;
+  margin-top: 6px;
+}
+
+.id-photo-result-box.pass {
+  background: rgba(34, 197, 94, 0.15);
+  border: 1px solid rgba(34, 197, 94, 0.4);
+  color: #4ade80;
+}
+
+.id-photo-result-box.fail {
+  background: rgba(239, 68, 68, 0.15);
+  border: 1px solid rgba(239, 68, 68, 0.4);
+  color: #f87171;
+}
+
+/* 하단 저장 및 조작 풋터 */
+.id-photo-footer {
+  padding: 16px;
+  background: #15181e;
+  border-top: 1px solid rgba(255, 255, 255, 0.08);
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-top: auto;
+}
+
+/* 인화지 모달 및 프리셋 관리 모달 */
+.id-photo-modal-backdrop {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.7);
+  backdrop-filter: blur(4px);
+  z-index: 10000;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.id-photo-modal-card {
+  background: #1e222b;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  border-radius: 12px;
+  padding: 20px;
+  max-width: 540px;
+  width: 90%;
+  max-height: 85vh;
+  overflow-y: auto;
+  box-shadow: 0 20px 40px rgba(0, 0, 0, 0.5);
+  color: #f1f5f9;
+}
+
+.id-photo-modal-title {
+  font-size: 16px;
+  font-weight: 700;
+  margin-bottom: 14px;
+  color: #f8fafc;
+}

@@ -1,0 +1,393 @@
+.stamp-modal-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 1050;
+  background-color: rgba(0, 0, 0, 0.75);
+  backdrop-filter: blur(4px);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+}
+
+.stamp-modal-container {
+  width: 95vw;
+  max-width: 1350px;
+  height: 90vh;
+  background-color: #1a1a22;
+  color: #ececec;
+  border-radius: 12px;
+  border: 1px solid #333342;
+  box-shadow: 0 20px 40px rgba(0, 0, 0, 0.6);
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.stamp-modal-header {
+  height: 52px;
+  padding: 0 20px;
+  background-color: #21212b;
+  border-bottom: 1px solid #2f2f3d;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.stamp-header-title {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.stamp-header-title h2 {
+  font-size: 16px;
+  font-weight: 600;
+  margin: 0;
+}
+
+.stamp-badge {
+  font-size: 12px;
+  background-color: #2e384d;
+  color: #7aa2f7;
+  padding: 2px 8px;
+  border-radius: 12px;
+}
+
+.photo-nav-box {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  background-color: #282836;
+  padding: 4px 10px;
+  border-radius: 6px;
+  border: 1px solid #38384a;
+}
+
+.nav-btn {
+  background: none;
+  border: none;
+  color: #aaa;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 12px;
+  cursor: pointer;
+  padding: 2px 6px;
+  border-radius: 4px;
+}
+
+.nav-btn:hover:not(:disabled) {
+  background-color: #3b3b4f;
+  color: #fff;
+}
+
+.nav-btn:disabled {
+  opacity: 0.3;
+  cursor: not-allowed;
+}
+
+.nav-counter {
+  font-size: 12px;
+  font-weight: 600;
+  color: #7aa2f7;
+}
+
+.stamp-close-btn {
+  background: none;
+  border: none;
+  color: #999;
+  cursor: pointer;
+  padding: 6px;
+  border-radius: 6px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: all 0.15s;
+}
+
+.stamp-close-btn:hover {
+  background-color: #383849;
+  color: #fff;
+}
+
+.stamp-main-body {
+  flex: 1;
+  display: flex;
+  min-height: 0;
+}
+
+.stamp-canvas-viewport {
+  flex: 1;
+  background-color: #121217;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  position: relative;
+  overflow: hidden;
+  padding: 20px;
+}
+
+.stamp-render-canvas {
+  display: block;
+  max-width: 100%;
+  max-height: calc(90vh - 120px);
+  object-fit: contain;
+  box-shadow: 0 4px 20px rgba(0, 0, 0, 0.6);
+  cursor: crosshair;
+}
+
+.tool-guide-badge {
+  position: absolute;
+  top: 16px;
+  background-color: rgba(0, 0, 0, 0.75);
+  color: #93c5fd;
+  font-size: 12px;
+  padding: 6px 14px;
+  border-radius: 20px;
+  border: 1px solid rgba(147, 197, 253, 0.3);
+}
+
+.stamp-sidebar {
+  width: 330px;
+  background-color: #1c1c25;
+  border-left: 1px solid #2b2b38;
+  display: flex;
+  flex-direction: column;
+  padding: 16px;
+  gap: 14px;
+  overflow-y: auto;
+}
+
+.stamp-section {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 10px;
+  background-color: #22222d;
+  border: 1px solid #30303e;
+  border-radius: 8px;
+}
+
+.section-title-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+}
+
+.section-title {
+  font-size: 12px;
+  font-weight: 600;
+  color: #ccc;
+}
+
+.checkbox-title {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 13px;
+  font-weight: 600;
+  color: #eee;
+  cursor: pointer;
+}
+
+.checkbox-title.bold {
+  font-weight: 700;
+  color: #93c5fd;
+}
+
+.section-body {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-top: 4px;
+}
+
+.field-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.field-label {
+  font-size: 12px;
+  color: #aaa;
+  width: 72px;
+  flex-shrink: 0;
+}
+
+.stamp-input {
+  flex: 1;
+  padding: 6px 8px;
+  background-color: #2a2a36;
+  border: 1px solid #3b3b4a;
+  border-radius: 4px;
+  color: #fff;
+  font-size: 12px;
+}
+
+.stamp-input:focus {
+  outline: none;
+  border-color: #3b82f6;
+}
+
+.stamp-select {
+  flex: 1;
+  padding: 6px 8px;
+  background-color: #2a2a36;
+  border: 1px solid #3b3b4a;
+  border-radius: 4px;
+  color: #fff;
+  font-size: 12px;
+}
+
+.corner-buttons {
+  flex: 1;
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 4px;
+}
+
+.corner-btn {
+  padding: 6px 2px;
+  background-color: #2a2a38;
+  border: 1px solid #38384a;
+  border-radius: 4px;
+  color: #aaa;
+  font-size: 11px;
+  cursor: pointer;
+}
+
+.corner-btn:hover {
+  background-color: #353548;
+  color: #fff;
+}
+
+.corner-btn.active {
+  background-color: #2563eb;
+  color: #fff;
+  border-color: #3b82f6;
+}
+
+.range-input {
+  flex: 1;
+  accent-color: #3b82f6;
+  cursor: pointer;
+}
+
+.unit-label {
+  font-size: 11px;
+  font-family: monospace;
+  color: #7aa2f7;
+  width: 36px;
+  text-align: right;
+}
+
+.color-palette {
+  display: flex;
+  gap: 6px;
+}
+
+.palette-chip {
+  width: 22px;
+  height: 22px;
+  border-radius: 4px;
+  border: 2px solid #333;
+  cursor: pointer;
+  padding: 0;
+}
+
+.palette-chip.active {
+  border-color: #fff;
+  transform: scale(1.15);
+}
+
+.tool-selector-row {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 4px;
+}
+
+.tool-btn {
+  padding: 6px 2px;
+  background-color: #2a2a38;
+  border: 1px solid #38384a;
+  border-radius: 4px;
+  color: #aaa;
+  font-size: 11px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 4px;
+  cursor: pointer;
+}
+
+.tool-btn:hover {
+  background-color: #333346;
+  color: #fff;
+}
+
+.tool-btn.active {
+  background-color: #2e384d;
+  color: #93c5fd;
+  border-color: #3b82f6;
+  font-weight: 600;
+}
+
+.clear-shapes-btn {
+  background: none;
+  border: none;
+  color: #ef4444;
+  font-size: 11px;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  gap: 2px;
+}
+
+.clear-shapes-btn:hover {
+  text-decoration: underline;
+}
+
+.batch-card {
+  background-color: #1e283d;
+  border-color: #294068;
+}
+
+.batch-hint {
+  font-size: 11px;
+  color: #93c5fd;
+  line-height: 1.4;
+}
+
+.stamp-footer-actions {
+  margin-top: auto;
+  padding-top: 10px;
+  border-top: 1px solid #2b2b38;
+}
+
+.save-stamp-btn {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  padding: 12px;
+  background-color: #2563eb;
+  color: #fff;
+  border: none;
+  border-radius: 6px;
+  font-size: 14px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: all 0.15s;
+}
+
+.save-stamp-btn:hover:not(:disabled) {
+  background-color: #1d4ed8;
+}
+
+.save-stamp-btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
