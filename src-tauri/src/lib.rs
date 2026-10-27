@@ -3005,6 +3005,24 @@ fn set_as_desktop_wallpaper(
     Ok(())
 }
 
+/// 이미지 바이트를 대상 확장자 형식으로 다시 인코딩 (JPEG은 투명도를 담을 수 없어 RGB로 변환)
+fn encode_image_bytes_for_ext(bytes: &[u8], ext: &str) -> Result<Vec<u8>, String> {
+    let img = image::load_from_memory(bytes).map_err(|e| format!("이미지를 읽을 수 없습니다: {e}"))?;
+    let mut out = std::io::Cursor::new(Vec::new());
+    match ext.to_lowercase().as_str() {
+        "jpg" | "jpeg" => {
+            let rgb = image::DynamicImage::ImageRgb8(img.to_rgb8());
+            let mut encoder = image::codecs::jpeg::JpegEncoder::new_with_quality(&mut out, 92);
+            encoder.encode_image(&rgb).map_err(|e| format!("JPEG 인코딩 실패: {e}"))?;
+        }
+        "png" => img.write_to(&mut out, image::ImageFormat::Png).map_err(|e| format!("PNG 저장 실패: {e}"))?,
+        "webp" => img.write_to(&mut out, image::ImageFormat::WebP).map_err(|e| format!("WebP 저장 실패: {e}"))?,
+        "bmp" => img.write_to(&mut out, image::ImageFormat::Bmp).map_err(|e| format!("BMP 저장 실패: {e}"))?,
+        other => return Err(format!("지원하지 않는 저장 형식입니다: {other}")),
+    }
+    Ok(out.into_inner())
+}
+
 #[tauri::command]
 fn save_clipboard_image(base64_data: String, target_path: String) -> Result<String, String> {
     use std::io::Write;
@@ -3024,8 +3042,12 @@ fn save_clipboard_image(base64_data: String, target_path: String) -> Result<Stri
         .decode(raw_b64.trim())
         .map_err(|e| format!("Base64 디코딩 실패: {}", e))?;
 
+    // 저장 창에서 고른 확장자(JPG/WebP 등)와 실제 내용이 일치하도록 다시 인코딩
+    let ext = target.extension().and_then(|e| e.to_str()).unwrap_or("png");
+    let encoded = encode_image_bytes_for_ext(&bytes, ext)?;
+
     let mut file = File::create(target).map_err(|e| format!("파일 생성 실패: {}", e))?;
-    file.write_all(&bytes).map_err(|e| format!("파일 쓰기 실패: {}", e))?;
+    file.write_all(&encoded).map_err(|e| format!("파일 쓰기 실패: {}", e))?;
 
     Ok(target.to_string_lossy().into_owned())
 }
@@ -4590,4 +4612,34 @@ pub fn run() {
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn sample_rgba_png() -> Vec<u8> {
+        let img = image::RgbaImage::from_pixel(4, 4, image::Rgba([255, 0, 0, 128]));
+        let mut buf = std::io::Cursor::new(Vec::new());
+        image::DynamicImage::ImageRgba8(img).write_to(&mut buf, image::ImageFormat::Png).unwrap();
+        buf.into_inner()
+    }
+
+    #[test]
+    fn encode_rgba_to_jpg_succeeds() {
+        let out = encode_image_bytes_for_ext(&sample_rgba_png(), "JPG").unwrap();
+        assert_eq!(image::guess_format(&out).unwrap(), image::ImageFormat::Jpeg);
+    }
+
+    #[test]
+    fn encode_to_webp_and_png() {
+        let png = sample_rgba_png();
+        assert_eq!(image::guess_format(&encode_image_bytes_for_ext(&png, "webp").unwrap()).unwrap(), image::ImageFormat::WebP);
+        assert_eq!(image::guess_format(&encode_image_bytes_for_ext(&png, "png").unwrap()).unwrap(), image::ImageFormat::Png);
+    }
+
+    #[test]
+    fn encode_unknown_ext_fails() {
+        assert!(encode_image_bytes_for_ext(&sample_rgba_png(), "gif").is_err());
+    }
 }
