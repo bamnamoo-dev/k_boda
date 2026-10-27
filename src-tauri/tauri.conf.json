@@ -43,7 +43,7 @@
       "icons/icon.ico"
     ],
     "resources": [
-      "binaries/libredwg/**/*",
+      "binaries/libredwg/*",
       "resources/*"
     ],
     "windows": {
