@@ -1,7 +1,7 @@
 [package]
 name = "k-boda"
-version = "0.1.0"
-description = "k-boda - 윈도우용 가벼운 이미지 뷰어"
+version = "1.0.0"
+description = "PrismView - 윈도우용 빠르고 가벼운 이미지 뷰어"
 authors = ["you"]
 edition = "2024"
 

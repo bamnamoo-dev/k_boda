@@ -194,22 +194,95 @@ fn sort_entries(items: &mut [ImageEntry], sort_by: SortBy, sort_order: SortOrder
     });
 }
 
-/// %LOCALAPPDATA%\k-boda\thumbnails 캐시 디렉토리
-fn get_thumbnail_cache_dir() -> PathBuf {
+/// 포터블 모드인지 확인
+/// (실행 파일 옆에 'data' 폴더가 있거나 'portable.txt' 또는 'portable' 파일이 존재하면 포터블 모드로 판단)
+fn is_portable_mode() -> bool {
+    if let Ok(exe_path) = std::env::current_exe() {
+        if let Some(dir) = exe_path.parent() {
+            if dir.join("data").is_dir() || dir.join("portable.txt").exists() || dir.join("portable").exists() {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+/// 앱의 기본 설정 데이터 디렉토리 반환
+/// - 포터블 모드: exe 옆의 "data" 폴더 (쓰기 권한 없으면 temp 폴더로 fallback)
+/// - 설치 모드: %APPDATA%\PrismView (기존 k-boda 데이터 자동 마이그레이션)
+fn get_app_settings_dir() -> PathBuf {
+    if is_portable_mode() {
+        if let Ok(exe_path) = std::env::current_exe() {
+            if let Some(dir) = exe_path.parent() {
+                let data_dir = dir.join("data");
+                if std::fs::create_dir_all(&data_dir).is_ok() {
+                    let test_file = data_dir.join(".write_test");
+                    if std::fs::write(&test_file, b"ok").is_ok() {
+                        let _ = std::fs::remove_file(&test_file);
+                        return data_dir;
+                    }
+                }
+                // 쓰기 권한이 없는 경우(읽기 전용 USB 등): Temp 디렉토리 fallback
+                let temp_dir = std::env::temp_dir().join("PrismView_Portable_Temp");
+                let _ = std::fs::create_dir_all(&temp_dir);
+                return temp_dir;
+            }
+        }
+    }
+
+    let base = std::env::var("APPDATA")
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| std::env::temp_dir());
+    let dir = base.join("PrismView");
+    let _ = std::fs::create_dir_all(&dir);
+
+    // 구버전(k-boda) 설정 마이그레이션
+    let legacy_dir = base.join("k-boda");
+    if legacy_dir.exists() && legacy_dir.is_dir() {
+        let legacy_settings = legacy_dir.join("settings.json");
+        let new_settings = dir.join("settings.json");
+        if legacy_settings.exists() && !new_settings.exists() {
+            let _ = std::fs::copy(&legacy_settings, &new_settings);
+        }
+        let legacy_presets = legacy_dir.join("id_photo_presets.json");
+        let new_presets = dir.join("id_photo_presets.json");
+        if legacy_presets.exists() && !new_presets.exists() {
+            let _ = std::fs::copy(&legacy_presets, &new_presets);
+        }
+    }
+
+    dir
+}
+
+/// 앱의 캐시/임시 디렉토리 반환
+/// - 포터블 모드: exe 옆의 "data\cache"
+/// - 설치 모드: %LOCALAPPDATA%\PrismView
+fn get_app_cache_base_dir() -> PathBuf {
+    if is_portable_mode() {
+        let base = get_app_settings_dir();
+        let cache_dir = base.join("cache");
+        let _ = std::fs::create_dir_all(&cache_dir);
+        return cache_dir;
+    }
+
     let base = std::env::var("LOCALAPPDATA")
         .map(PathBuf::from)
         .unwrap_or_else(|_| std::env::temp_dir());
-    let cache_dir = base.join("k-boda").join("thumbnails");
+    let dir = base.join("PrismView");
+    let _ = std::fs::create_dir_all(&dir);
+    dir
+}
+
+/// 썸네일 캐시 디렉토리
+fn get_thumbnail_cache_dir() -> PathBuf {
+    let cache_dir = get_app_cache_base_dir().join("thumbnails");
     let _ = std::fs::create_dir_all(&cache_dir);
     cache_dir
 }
 
-/// %LOCALAPPDATA%\k-boda\zip_temp 임시 디렉토리 (ZIP 온디맨드 추출용)
+/// ZIP 온디맨드 추출 임시 디렉토리
 fn get_zip_temp_dir() -> PathBuf {
-    let base = std::env::var("LOCALAPPDATA")
-        .map(PathBuf::from)
-        .unwrap_or_else(|_| std::env::temp_dir());
-    let temp_dir = base.join("k-boda").join("zip_temp");
+    let temp_dir = get_app_cache_base_dir().join("zip_temp");
     let _ = std::fs::create_dir_all(&temp_dir);
     temp_dir
 }
@@ -1096,17 +1169,8 @@ impl Default for AppSettings {
 }
 
 fn get_settings_file_path() -> Option<PathBuf> {
-    let app_data = std::env::var("APPDATA").ok()?;
-    let dir = PathBuf::from(&app_data).join("k-boda");
-    let _ = std::fs::create_dir_all(&dir);
-    let path = dir.join("settings.json");
-    if !path.exists() {
-        let legacy_path = PathBuf::from(&app_data).join("PrismView").join("settings.json");
-        if legacy_path.exists() {
-            let _ = std::fs::copy(&legacy_path, &path);
-        }
-    }
-    Some(path)
+    let dir = get_app_settings_dir();
+    Some(dir.join("settings.json"))
 }
 
 #[tauri::command]
@@ -1171,17 +1235,8 @@ pub struct IdPhotoValidationResult {
 }
 
 fn get_id_photo_presets_path() -> Option<PathBuf> {
-    let app_data = std::env::var("APPDATA").ok()?;
-    let dir = PathBuf::from(&app_data).join("k-boda");
-    let _ = std::fs::create_dir_all(&dir);
-    let path = dir.join("id_photo_presets.json");
-    if !path.exists() {
-        let legacy = PathBuf::from(&app_data).join("PrismView").join("id_photo_presets.json");
-        if legacy.exists() {
-            let _ = std::fs::copy(&legacy, &path);
-        }
-    }
-    Some(path)
+    let dir = get_app_settings_dir();
+    Some(dir.join("id_photo_presets.json"))
 }
 
 fn get_default_id_photo_presets() -> Vec<IdPhotoPreset> {
@@ -1605,11 +1660,7 @@ pub struct CadConvertResult {
 }
 
 fn get_cad_cache_dir() -> PathBuf {
-    let dir = std::env::var("LOCALAPPDATA")
-        .map(PathBuf::from)
-        .unwrap_or_else(|_| std::env::temp_dir())
-        .join("k-boda")
-        .join("cad_cache");
+    let dir = get_app_cache_base_dir().join("cad_cache");
     let _ = std::fs::create_dir_all(&dir);
     dir
 }
@@ -1631,7 +1682,7 @@ fn find_libredwg_tool(tool_name: &str) -> Result<PathBuf, String> {
         return Ok(dev_path_flat);
     }
 
-    // 2. 실행 파일(.exe) 디렉터리 기준 (배포 환경)
+    // 2. 실행 파일(.exe) 디렉터리 기준 (배포 환경 및 포터블)
     if let Ok(exe_path) = std::env::current_exe() {
         if let Some(exe_dir) = exe_path.parent() {
             let candidate1 = exe_dir.join("binaries").join("libredwg").join(tool_name);
@@ -1641,6 +1692,11 @@ fn find_libredwg_tool(tool_name: &str) -> Result<PathBuf, String> {
             let candidate2 = exe_dir.join(tool_name);
             if candidate2.exists() {
                 return Ok(candidate2);
+            }
+            // Tauri bundle resources 경로
+            let candidate3 = exe_dir.join("resources").join("binaries").join("libredwg").join(tool_name);
+            if candidate3.exists() {
+                return Ok(candidate3);
             }
         }
     }
@@ -4413,6 +4469,35 @@ fn generate_images_pdf(opts: GeneratePdfOptions) -> Result<GeneratePdfResult, St
     })
 }
 
+#[derive(Serialize, Clone, Debug)]
+#[serde(rename_all = "camelCase")]
+pub struct AppEnvInfo {
+    pub is_portable: bool,
+    pub is_read_only: bool,
+    pub data_dir: String,
+    pub version: String,
+}
+
+#[tauri::command]
+fn get_app_env_info() -> AppEnvInfo {
+    let is_portable = is_portable_mode();
+    let data_dir = get_app_settings_dir();
+    let mut is_read_only = false;
+    let test_file = data_dir.join(".perm_test");
+    if std::fs::write(&test_file, b"test").is_err() {
+        is_read_only = true;
+    } else {
+        let _ = std::fs::remove_file(&test_file);
+    }
+
+    AppEnvInfo {
+        is_portable,
+        is_read_only,
+        data_dir: data_dir.to_string_lossy().to_string(),
+        version: "1.0.0".to_string(),
+    }
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     // 과거 임시 스테이징 폴더에 남은 고아 파일들을 안전하게 실제 휴지통으로 이동
@@ -4500,7 +4585,8 @@ pub fn run() {
             generate_images_pdf,
             get_tiff_page,
             get_heic_display_path,
-            save_edited_advanced
+            save_edited_advanced,
+            get_app_env_info
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

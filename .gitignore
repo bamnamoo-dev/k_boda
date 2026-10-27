@@ -25,3 +25,6 @@ src-tauri/gen/
 *.njsproj
 *.sln
 *.sw?
+
+# 배포 산출물
+release/

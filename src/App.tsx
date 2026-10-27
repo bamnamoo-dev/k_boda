@@ -380,6 +380,13 @@ function App() {
   // 6단계 & 7단계 & 9단계: 설정 및 도움말 모달 상태
   const [showSettingsModal, setShowSettingsModal] = useState(false);
   const [showHelpModal, setShowHelpModal] = useState(false);
+  const [helpModalTab, setHelpModalTab] = useState<"shortcuts" | "about" | "license">("shortcuts");
+  const [appEnvInfo, setAppEnvInfo] = useState<{
+    isPortable: boolean;
+    isReadOnly: boolean;
+    dataDir: string;
+    version: string;
+  } | null>(null);
   const [settingsTab, setSettingsTab] = useState<"general" | "view">("general");
   const [settings, setSettings] = useState<AppSettings>({
     theme: "dark",
@@ -2806,9 +2813,64 @@ function App() {
     return map;
   }, [commands]);
 
+  // 11단계 배포 전 점검 4번: WebView2 브라우저 기본 동작 원천 차단
+  useEffect(() => {
+    // 1) Ctrl + 마우스 휠로 브라우저 전체 확대/축소 방지 (앱 레이아웃 깨짐 방지)
+    const onWheel = (e: WheelEvent) => {
+      if (e.ctrlKey) {
+        e.preventDefault();
+      }
+    };
+    window.addEventListener("wheel", onWheel, { passive: false });
+
+    // 2) WebView2 기본 우클릭 메뉴(검사, 새로 고침, 뒤로 가기) 전역 차단
+    const onGlobalContextMenu = (e: MouseEvent) => {
+      const target = e.target as HTMLElement | null;
+      // 텍스트 입력창(input, textarea)을 제외한 모든 곳에서 브라우저 기본 메뉴 방지
+      if (target && (target.tagName === "INPUT" || target.tagName === "TEXTAREA")) {
+        return;
+      }
+      e.preventDefault();
+    };
+    window.addEventListener("contextmenu", onGlobalContextMenu);
+
+    return () => {
+      window.removeEventListener("wheel", onWheel);
+      window.removeEventListener("contextmenu", onGlobalContextMenu);
+    };
+  }, []);
+
   // 키보드 단축키 (KeyboardEvent.code 기준 - 모두 명령 목록 commandsRef를 사용)
   useEffect(() => {
     const onKeyDown = (e: KeyboardEvent) => {
+      // 11단계 배포 전 점검 4번: 브라우저/WebView2 기본 단축키 원천 가로채기 차단
+      // 1) 새로고침 방지: F5, Ctrl+F5, Ctrl+R (앱이 첫 화면으로 초기화되는 현상 방지)
+      if (e.code === "F5" || (e.ctrlKey && e.code === "KeyR")) {
+        e.preventDefault();
+      }
+      // 2) 개발자 도구 방지: F12, Ctrl+Shift+I, Ctrl+Shift+J, Ctrl+Shift+C
+      if (
+        e.code === "F12" ||
+        (e.ctrlKey && e.shiftKey && (e.code === "KeyI" || e.code === "KeyJ" || e.code === "KeyC"))
+      ) {
+        e.preventDefault();
+        return;
+      }
+      // 3) 소스보기 / 브라우저 찾기 방지: Ctrl+U, Ctrl+F
+      if (e.ctrlKey && !e.shiftKey && !e.altKey && (e.code === "KeyU" || e.code === "KeyF")) {
+        e.preventDefault();
+        return;
+      }
+      // 4) 브라우저 히스토리 뒤로가기 방지: Alt+Left / Alt+Right
+      if (e.altKey && (e.code === "ArrowLeft" || e.code === "ArrowRight")) {
+        e.preventDefault();
+        return;
+      }
+      // 5) 브라우저 기본 인쇄창 방지: Ctrl+P
+      if (e.ctrlKey && !e.shiftKey && !e.altKey && e.code === "KeyP") {
+        e.preventDefault();
+      }
+
       // 14단계 B: 일괄 작업 모달이 열려있을 때 전역 키 핸들러 비활성화 (Escape 시 닫기)
       if (batchModalState !== null) {
         if (e.code === "Escape") {
@@ -3251,6 +3313,10 @@ function App() {
         // 시스템 드라이브 및 바로가기 미리 로드
         const locs = await invoke<SystemLocation[]>("get_system_locations").catch(() => []);
         setSystemLocations(locs);
+
+        // 앱 환경 정보(포터블 모드 여부, 데이터 디렉터리, 쓰기 권한) 로드
+        const env = await invoke<any>("get_app_env_info").catch(() => null);
+        if (env) setAppEnvInfo(env);
 
         // 실행 인자로 전달된 첫 파일 확인
         const initPath = await invoke<string | null>("get_initial_file").catch(() => null);
@@ -5546,7 +5612,7 @@ function App() {
         </div>
       )}
 
-      {/* 6단계 & 7단계: 도움말 (단축키 안내) 모달 */}
+      {/* 6단계 & 7단계 & 11단계: 도움말 및 PrismView 정보 모달 */}
       {showHelpModal && (
         <div
           className="modal-overlay"
@@ -5556,9 +5622,14 @@ function App() {
             if (e.target === e.currentTarget) setShowHelpModal(false);
           }}
         >
-          <div className="modal-box help-modal-box">
+          <div className="modal-box help-modal-box" style={{ maxWidth: "620px" }}>
             <div className="modal-header">
-              <h3 className="modal-title">단축키 안내</h3>
+              <div style={{ display: "flex", alignItems: "center", gap: "10px" }}>
+                <h3 className="modal-title">PrismView 도움말 & 정보</h3>
+                <span style={{ fontSize: "12px", padding: "2px 8px", borderRadius: "12px", background: "var(--accent)", color: "#fff", fontWeight: 600 }}>
+                  v{appEnvInfo?.version || "1.0.0"}
+                </span>
+              </div>
               <button
                 className="modal-close-btn"
                 onClick={() => setShowHelpModal(false)}
@@ -5568,69 +5639,168 @@ function App() {
               </button>
             </div>
 
-            <div className="help-content-scroll">
-              {(
-                [
-                  "탐색 및 이동",
-                  "화면 확대 및 뷰포트",
-                  "보기 모드 및 편집",
-                  "파일 및 부가 기능",
-                ] as const
-              ).map((category) => {
-                const categoryCmds = commands.filter(
-                  (c) => c.category === category && c.shortcutDisplay
-                );
-                if (categoryCmds.length === 0) return null;
-                return (
-                  <div key={category} className="help-section">
-                    <h4 className="help-section-title">{category}</h4>
-                    <table className="help-table">
-                      <tbody>
-                        {categoryCmds.map((cmd) => (
-                          <tr key={cmd.id}>
-                            <td>
-                              {cmd.shortcutDisplay.split("/").map((part, pIdx) => (
-                                <span key={pIdx}>
-                                  {pIdx > 0 && " / "}
-                                  <kbd>{part.trim()}</kbd>
-                                </span>
-                              ))}
-                            </td>
-                            <td>
-                              {cmd.label}
-                              {cmd.scope && cmd.scope !== "all" && (
-                                <span
-                                  style={{
-                                    fontSize: "10.5px",
-                                    color: "var(--fg-dim)",
-                                    marginLeft: "6px",
-                                  }}
-                                >
-                                  ({cmd.scope === "viewer" ? "뷰어 전용" : "탐색기 전용"})
-                                </span>
-                              )}
-                            </td>
-                          </tr>
-                        ))}
-                      </tbody>
-                    </table>
-                  </div>
-                );
-              })}
-              <div className="help-section" style={{ marginTop: "16px", padding: "10px", background: "rgba(255, 255, 255, 0.04)", borderRadius: "8px", fontSize: "11.5px", lineHeight: "1.6", color: "var(--fg-dim)" }}>
-                <h4 className="help-section-title" style={{ fontSize: "12px", marginBottom: "6px" }}>오픈소스 라이선스 및 도면(CAD) 뷰어 정보</h4>
-                <p>
-                  <strong>• LibreDWG 0.14:</strong> GNU General Public License v3.0 이상 (GPLv3+). 독립 실행 파일(sidecar) 방식으로 프로세스 분리 실행되며, AutoCAD R1.1 ~ 2024(R31) DWG 형식을 지원합니다.
-                  <br />
-                  소스 코드 및 프로젝트: <span style={{ color: "var(--accent)" }}>https://www.gnu.org/software/libredwg/</span>
-                </p>
-                <p style={{ marginTop: "4px" }}>
-                  <strong>• dxf-parser:</strong> MIT License (<span style={{ color: "var(--accent)" }}>https://github.com/gdsestimating/dxf-parser</span>)
-                </p>
-              </div>
+            {/* 상단 탭 버튼 */}
+            <div className="settings-tabs" style={{ padding: "0 20px 8px" }}>
+              <button
+                className={`tab-button ${helpModalTab === "shortcuts" ? "active" : ""}`}
+                onClick={() => setHelpModalTab("shortcuts")}
+              >
+                단축키 안내
+              </button>
+              <button
+                className={`tab-button ${helpModalTab === "about" ? "active" : ""}`}
+                onClick={() => setHelpModalTab("about")}
+              >
+                PrismView 정보
+              </button>
+              <button
+                className={`tab-button ${helpModalTab === "license" ? "active" : ""}`}
+                onClick={() => setHelpModalTab("license")}
+              >
+                오픈소스 라이선스
+              </button>
             </div>
 
-            <div className="modal-buttons">
+            <div className="help-content-scroll" style={{ maxHeight: "460px" }}>
+              {helpModalTab === "shortcuts" && (
+                <>
+                  {(
+                    [
+                      "탐색 및 이동",
+                      "화면 확대 및 뷰포트",
+                      "보기 모드 및 편집",
+                      "파일 및 부가 기능",
+                    ] as const
+                  ).map((category) => {
+                    const categoryCmds = commands.filter(
+                      (c) => c.category === category && c.shortcutDisplay
+                    );
+                    if (categoryCmds.length === 0) return null;
+                    return (
+                      <div key={category} className="help-section">
+                        <h4 className="help-section-title">{category}</h4>
+                        <table className="help-table">
+                          <tbody>
+                            {categoryCmds.map((cmd) => (
+                              <tr key={cmd.id}>
+                                <td>
+                                  {cmd.shortcutDisplay.split("/").map((part, pIdx) => (
+                                    <span key={pIdx}>
+                                      {pIdx > 0 && " / "}
+                                      <kbd>{part.trim()}</kbd>
+                                    </span>
+                                  ))}
+                                </td>
+                                <td>
+                                  {cmd.label}
+                                  {cmd.scope && cmd.scope !== "all" && (
+                                    <span
+                                      style={{
+                                        fontSize: "10.5px",
+                                        color: "var(--fg-dim)",
+                                        marginLeft: "6px",
+                                      }}
+                                    >
+                                      ({cmd.scope === "viewer" ? "뷰어 전용" : "탐색기 전용"})
+                                    </span>
+                                  )}
+                                </td>
+                              </tr>
+                            ))}
+                          </tbody>
+                        </table>
+                      </div>
+                    );
+                  })}
+                </>
+              )}
+
+              {helpModalTab === "about" && (
+                <div style={{ display: "flex", flexDirection: "column", gap: "14px", padding: "4px" }}>
+                  <div style={{ background: "rgba(255, 255, 255, 0.04)", padding: "14px", borderRadius: "8px", border: "1px solid rgba(255, 255, 255, 0.08)" }}>
+                    <div style={{ fontSize: "16px", fontWeight: 700, color: "#fff", display: "flex", alignItems: "center", gap: "8px" }}>
+                      PrismView <span style={{ fontSize: "12px", color: "var(--accent)" }}>v1.0.0 정식 릴리즈</span>
+                    </div>
+                    <div style={{ fontSize: "12px", color: "var(--fg-dim)", marginTop: "4px" }}>
+                      윈도우 10/11 전용 빠르고 가벼운 초경량 이미지 뷰어
+                    </div>
+                  </div>
+
+                  <div style={{ background: "rgba(255, 255, 255, 0.03)", padding: "12px", borderRadius: "8px", fontSize: "12px", lineHeight: "1.7" }}>
+                    <div><strong>• 실행 환경:</strong> {appEnvInfo?.isPortable ? "🚀 무설치 포터블(Portable) 모드" : "💻 일반 설치(Installer) 모드"}</div>
+                    <div><strong>• 데이터 저장 위치:</strong> <span style={{ wordBreak: "break-all", color: "#38bdf8" }}>{appEnvInfo?.dataDir || "%APPDATA%\\PrismView"}</span></div>
+                    {appEnvInfo?.isReadOnly ? (
+                      <div style={{ color: "#ef4444", marginTop: "4px" }}>
+                        ⚠️ 현재 실행 폴더에 쓰기 권한이 없어 시스템 임시 폴더에 캐시 중입니다.
+                      </div>
+                    ) : (
+                      <div style={{ color: "#4ade80", marginTop: "2px" }}>
+                        ✔ 설정 및 캐시 쓰기 정상
+                      </div>
+                    )}
+                  </div>
+
+                  <div style={{ background: "rgba(56, 189, 248, 0.08)", border: "1px solid rgba(56, 189, 248, 0.25)", padding: "12px", borderRadius: "8px", fontSize: "12px", lineHeight: "1.6" }}>
+                    <strong style={{ color: "#38bdf8" }}>🔒 100% 로컬 프라이버시 보장</strong>
+                    <div style={{ color: "var(--fg-dim)", marginTop: "4px" }}>
+                      사진, 공무원증/증명사진, CAD 도면 등 어떤 데이터도 외부 인터넷이나 클라우드로 전송되지 않습니다.
+                      얼굴 인식(MediaPipe BlazeFace), 포맷 변환, 인쇄 등 모든 기능이 PC 내부에서 오프라인으로 작동합니다.
+                    </div>
+                  </div>
+
+                  <div style={{ display: "flex", justifyContent: "flex-end", marginTop: "6px" }}>
+                    <button
+                      className="glass-button btn-secondary"
+                      onClick={() => setHelpModalTab("license")}
+                    >
+                      📜 전체 오픈소스 라이선스 목록 보기
+                    </button>
+                  </div>
+                </div>
+              )}
+
+              {helpModalTab === "license" && (
+                <div style={{ fontSize: "11.5px", lineHeight: "1.6", color: "var(--fg-dim)" }}>
+                  <div style={{ background: "rgba(255, 255, 255, 0.03)", padding: "12px", borderRadius: "8px", marginBottom: "12px" }}>
+                    <h4 style={{ color: "#fff", fontSize: "13px", marginBottom: "6px" }}>오픈소스 소프트웨어 고지</h4>
+                    PrismView는 전 세계 오픈소스 커뮤니티의 훌륭한 프로젝트들을 기반으로 제작되었습니다.
+                  </div>
+
+                  <div className="help-section" style={{ background: "rgba(255, 255, 255, 0.02)", padding: "10px", borderRadius: "6px", marginBottom: "10px" }}>
+                    <h4 style={{ color: "#fff", fontSize: "12px", marginBottom: "4px" }}>1. GNU LibreDWG (CAD 도면 변환기)</h4>
+                    <p>• 라이선스: GNU General Public License v3.0 이상 (GPLv3+)</p>
+                    <p>• 격리 구조: 앱에 링크되지 않고 별도 프로세스(sidecar CLI: dwg2dxf.exe)로만 격리 호출</p>
+                    <p>• 소스 코드: <span style={{ color: "var(--accent)" }}>https://www.gnu.org/software/libredwg/</span></p>
+                  </div>
+
+                  <div className="help-section" style={{ background: "rgba(255, 255, 255, 0.02)", padding: "10px", borderRadius: "6px", marginBottom: "10px" }}>
+                    <h4 style={{ color: "#fff", fontSize: "12px", marginBottom: "4px" }}>2. MediaPipe Tasks Vision (BlazeFace 로컬 AI)</h4>
+                    <p>• 라이선스: Apache License 2.0 (Google LLC)</p>
+                    <p>• 100% 로컬 WASM 및 TFLite 모델 내장 (외부 통신 0건)</p>
+                  </div>
+
+                  <div className="help-section" style={{ background: "rgba(255, 255, 255, 0.02)", padding: "10px", borderRadius: "6px", marginBottom: "10px" }}>
+                    <h4 style={{ color: "#fff", fontSize: "12px", marginBottom: "4px" }}>3. 주요 프레임워크 및 라이브러리</h4>
+                    <p>• <strong>React 19 / ReactDOM:</strong> MIT License</p>
+                    <p>• <strong>Tauri 2 Framework:</strong> MIT / Apache 2.0 License</p>
+                    <p>• <strong>dxf-parser:</strong> MIT License</p>
+                    <p>• <strong>Lucide Icons:</strong> ISC License</p>
+                    <p>• <strong>Rust Crates (image, tiff, zip, trash, pdf-writer, kamadak-exif):</strong> MIT / Apache 2.0 / BSD</p>
+                  </div>
+
+                  <div style={{ textAlign: "center", marginTop: "10px", opacity: 0.8 }}>
+                    앱 설치 폴더의 <code>LICENSES.txt</code> 및 <code>GPLv3.txt</code> 파일에서 전문을 확인하실 수 있습니다.
+                  </div>
+                </div>
+              )}
+            </div>
+
+            <div className="modal-buttons" style={{ display: "flex", justifyContent: "space-between" }}>
+              {helpModalTab !== "shortcuts" ? (
+                <button className="glass-button btn-secondary" onClick={() => setHelpModalTab("shortcuts")}>
+                  ← 단축키 안내로
+                </button>
+              ) : <div />}
               <button className="glass-button btn-primary" onClick={() => setShowHelpModal(false)}>
                 닫기 (Esc)
               </button>

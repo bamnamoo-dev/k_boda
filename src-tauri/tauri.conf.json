@@ -1,8 +1,8 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "k-boda",
-  "version": "0.1.0",
-  "identifier": "com.kboda.app",
+  "productName": "PrismView",
+  "version": "1.0.0",
+  "identifier": "com.prismview.app",
   "build": {
     "beforeDevCommand": "npm run dev",
     "devUrl": "http://localhost:1420",
@@ -13,7 +13,7 @@
     "windows": [
       {
         "label": "main",
-        "title": "k-boda",
+        "title": "PrismView",
         "width": 1200,
         "height": 800,
         "minWidth": 400,
@@ -42,7 +42,8 @@
       "icons/icon.ico"
     ],
     "resources": [
-      "binaries/libredwg/**/*"
+      "binaries/libredwg/**/*",
+      "resources/*"
     ],
     "windows": {
       "webviewInstallMode": {
@@ -51,20 +52,21 @@
       "nsis": {
         "installMode": "currentUser",
         "languages": ["Korean", "English"],
-        "displayLanguageSelector": false
+        "displayLanguageSelector": false,
+        "installerHooks": "installer-hooks.nsh"
       }
     },
     "fileAssociations": [
       {
-        "ext": ["jpg", "jpeg", "jfif", "png", "gif", "webp", "avif", "bmp", "svg", "tif", "tiff", "heic", "heif"],
+        "ext": ["jpg", "jpeg", "png", "gif", "webp", "avif", "bmp", "svg", "tif", "tiff", "heic", "heif"],
         "name": "Image File",
-        "description": "k-boda Image File",
+        "description": "PrismView Image File",
         "role": "Viewer"
       },
       {
         "ext": ["zip", "cbz"],
         "name": "Comic Archive",
-        "description": "k-boda Comic Archive",
+        "description": "PrismView Comic Archive",
         "role": "Viewer"
       }
     ]
