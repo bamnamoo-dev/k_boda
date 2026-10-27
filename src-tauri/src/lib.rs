@@ -2577,11 +2577,8 @@ fn undo_last_action(undo_state: tauri::State<UndoState>) -> Result<String, Strin
                     if std::fs::rename(dest_p, orig_p).is_ok() {
                         restored_count += 1;
                     } else if copy_entry_recursive(dest_p, orig_p).is_ok() {
-                        let _ = if dest_p.is_dir() {
-                            std::fs::remove_dir_all(dest_p)
-                        } else {
-                            std::fs::remove_file(dest_p)
-                        };
+                        // 다른 드라이브 간 되돌리기: 남은 사본은 영구 삭제하지 않고 휴지통으로 이동
+                        let _ = trash::delete(dest_p);
                         restored_count += 1;
                     }
                 }
