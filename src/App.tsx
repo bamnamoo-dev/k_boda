@@ -53,6 +53,10 @@ const isCadPath = (p?: string | null): boolean => {
   return lower.endsWith(".dwg") || lower.endsWith(".dxf");
 };
 
+// 미리 읽기 대상 인덱스: 현재 장 기준 앞뒤 2장 (목록 범위 밖은 제외)
+const getPreloadIndices = (current: number, length: number): number[] =>
+  [current - 2, current - 1, current + 1, current + 2].filter((i) => i >= 0 && i < length);
+
 // 줌 배율 범위 (2% ~ 6400%)
 const MIN_SCALE = 0.02;
 const MAX_SCALE = 64.0;
@@ -1238,27 +1242,31 @@ function App() {
     navigateToIndex(itemsRef.current.length - 1);
   }, [navigateToIndex]);
 
-  // 미리 읽기: 앞 1장, 뒤 2장 decode()
+  // 미리 읽기: 앞뒤 2장 decode(), 범위를 벗어난 항목은 해제
   useEffect(() => {
     const list = items;
-    if (list.length === 0) return;
+    const cache = preloadCacheRef.current;
 
-    const targets: number[] = [];
-    if (currentIndex - 1 >= 0) targets.push(currentIndex - 1);
-    if (currentIndex + 1 < list.length) targets.push(currentIndex + 1);
-    if (currentIndex + 2 < list.length) targets.push(currentIndex + 2);
+    const wanted = new Set<string>();
+    for (const idx of getPreloadIndices(currentIndex, list.length)) {
+      const p = list[idx].path;
+      if (p) wanted.add(convertFileSrc(p));
+    }
 
-    for (const idx of targets) {
-      const it = list[idx];
-      if (it.path) {
-        const url = convertFileSrc(it.path);
-        if (!preloadCacheRef.current.has(url)) {
-          const img = new Image();
-          img.decoding = "async";
-          img.src = url;
-          img.decode().catch(() => {});
-          preloadCacheRef.current.set(url, img);
-        }
+    for (const [url, img] of cache) {
+      if (!wanted.has(url)) {
+        img.src = "";
+        cache.delete(url);
+      }
+    }
+
+    for (const url of wanted) {
+      if (!cache.has(url)) {
+        const img = new Image();
+        img.decoding = "async";
+        img.src = url;
+        img.decode().catch(() => {});
+        cache.set(url, img);
       }
     }
   }, [currentIndex, items]);
