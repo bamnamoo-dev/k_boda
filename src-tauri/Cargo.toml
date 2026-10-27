@@ -2,7 +2,7 @@
 name = "k-boda"
 version = "1.0.0"
 description = "PrismView - 윈도우용 빠르고 가벼운 이미지 뷰어"
-authors = ["you"]
+authors = ["bamnamoo"]
 edition = "2024"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html

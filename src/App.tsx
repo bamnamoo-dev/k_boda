@@ -41,7 +41,7 @@ import { PhotoStampModal } from "./PhotoStampModal";
 import { CropOverlay, type CropArea } from "./CropOverlay";
 import { AdjustModal, type AdjustParams } from "./AdjustModal";
 
-const APP_NAME = "k-boda";
+const APP_NAME = "PrismView";
 const IMAGE_EXTENSIONS = ["jpg", "jpeg", "jfif", "png", "gif", "webp", "avif", "bmp", "svg", "tif", "tiff", "heic", "heif"];
 const ARCHIVE_EXTENSIONS = ["zip", "cbz"];
 const CAD_EXTENSIONS = ["dwg", "dxf"];

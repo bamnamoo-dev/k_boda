@@ -8,7 +8,7 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 const rootDir = path.resolve(__dirname, "..");
 
-const VERSION = "1.0.0";
+const VERSION = JSON.parse(fs.readFileSync(path.join(rootDir, "package.json"), "utf8")).version;
 const RELEASE_DIR = path.join(rootDir, "release", VERSION);
 const TEMP_PORTABLE_DIR = path.join(rootDir, "release", "portable_temp");
 

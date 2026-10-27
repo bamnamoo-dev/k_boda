@@ -654,7 +654,7 @@ fn show_in_folder(path: String) -> Result<(), String> {
     Ok(())
 }
 
-/// 파일 삭제 (실행 취소(Ctrl+Z)를 위해 스테이징 후 최대 20단계 스택 관리, 스택 초과시 휴지통으로 이동)
+/// 파일을 윈도우 휴지통으로 보내고 되돌리기(Ctrl+Z) 기록에 추가
 #[tauri::command]
 fn delete_to_trash(path: String, undo_state: tauri::State<UndoState>) -> Result<(), String> {
     delete_paths_to_trash(vec![path], undo_state)
@@ -4055,6 +4055,7 @@ fn get_tiff_page(app: tauri::AppHandle, path: String, page_index: u32) -> Result
 
     if !cache_path.exists() {
         dyn_img.save(&cache_path).map_err(|e| format!("TIFF 캐시 저장 실패: {e}"))?;
+        cleanup_cache_if_needed(&cache_dir);
     }
     let _ = app.asset_protocol_scope().allow_file(&cache_path);
 
@@ -4098,6 +4099,7 @@ fn get_heic_display_path(app: tauri::AppHandle, path: String) -> Result<String, 
     if !output.status.success() || !cache_path.exists() {
         return Err("HEIC_CODEC_MISSING".to_string());
     }
+    cleanup_cache_if_needed(&cache_dir);
 
     let _ = app.asset_protocol_scope().allow_file(&cache_path);
     Ok(cache_path.to_string_lossy().into_owned())

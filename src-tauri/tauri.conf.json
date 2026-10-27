@@ -59,7 +59,7 @@
     },
     "fileAssociations": [
       {
-        "ext": ["jpg", "jpeg", "png", "gif", "webp", "avif", "bmp", "svg", "tif", "tiff", "heic", "heif"],
+        "ext": ["jpg", "jpeg", "jfif", "png", "gif", "webp", "avif", "bmp", "svg", "tif", "tiff", "heic", "heif"],
         "name": "Image File",
         "description": "PrismView Image File",
         "role": "Viewer"
