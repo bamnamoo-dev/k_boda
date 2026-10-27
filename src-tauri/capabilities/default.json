@@ -9,6 +9,8 @@
     "core:window:allow-set-fullscreen",
     "core:window:allow-is-fullscreen",
     "dialog:allow-open",
+    "dialog:allow-ask",
+    "dialog:allow-save",
     "window-state:default",
     "drag:default"
   ]

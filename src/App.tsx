@@ -3,7 +3,7 @@ import { convertFileSrc, invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
 import { getCurrentWindow } from "@tauri-apps/api/window";
-import { open, save } from "@tauri-apps/plugin-dialog";
+import { ask, open, save } from "@tauri-apps/plugin-dialog";
 import { startDrag } from "@crabnebula/tauri-plugin-drag";
 import {
   type AppCommand,
@@ -2179,6 +2179,25 @@ function App() {
       return;
     }
     try {
+      // 덮어쓰기 모드: 이름이 겹치는 파일이 있으면 먼저 확인 (규칙 3)
+      if (copyMoveConflict === "overwrite") {
+        const sep = target.endsWith("\\") || target.endsWith("/") ? "" : "\\";
+        let conflicts = 0;
+        for (const src of copyMoveSourcePaths) {
+          const name = src.split(/[\\/]/).pop() || "";
+          const dest = `${target}${sep}${name}`;
+          if (dest.toLowerCase() === src.toLowerCase()) continue;
+          if (await invoke<boolean>("check_path_exists", { path: dest })) conflicts++;
+        }
+        if (conflicts > 0) {
+          const ok = await ask(
+            `대상 폴더에 이름이 같은 파일이 ${conflicts}개 있습니다.\n기존 파일은 휴지통으로 이동하고 덮어씁니다. 계속할까요?`,
+            { title: "덮어쓰기 확인", kind: "warning", okLabel: "덮어쓰기", cancelLabel: "취소" }
+          );
+          if (!ok) return;
+        }
+      }
+
       const cmdName =
         copyMoveMode === "copy" ? "copy_files_to_folder" : "move_files_to_folder";
       const res = await invoke<string[]>(cmdName, {
