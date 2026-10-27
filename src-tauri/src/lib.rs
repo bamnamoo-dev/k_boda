@@ -727,8 +727,6 @@ fn save_image_advanced(
     rotation: u32,
     flip_h: bool,
     flip_v: bool,
-    _strip_metadata: bool,
-    _strip_ai_prompt: bool,
     resize_width: Option<u32>,
     resize_height: Option<u32>,
 ) -> Result<String, String> {
@@ -3945,7 +3943,6 @@ pub struct GeneratePdfResult {
 fn save_edited_image(
     base64_data: String,
     target_path: String,
-    _strip_exif: Option<bool>,
 ) -> Result<String, String> {
     use std::io::Write;
     use base64::Engine;

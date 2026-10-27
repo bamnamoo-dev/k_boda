@@ -43,7 +43,6 @@ export function MosaicEditorModal({
   const [selectedBoxId, setSelectedBoxId] = useState<string | null>(null);
   const [currentType, setCurrentType] = useState<MosaicType>("pixelate");
   const [currentIntensity, setCurrentIntensity] = useState<number>(24);
-  const [stripExif, setStripExif] = useState<boolean>(true);
   const [isDetectingFaces, setIsDetectingFaces] = useState<boolean>(false);
   const [faceDetectionAlert, setFaceDetectionAlert] = useState<string | null>(null);
   const [isSaving, setIsSaving] = useState<boolean>(false);
@@ -441,7 +440,6 @@ export function MosaicEditorModal({
       const savedPath = await invoke<string>("save_edited_image", {
         base64Data: dataUrl,
         targetPath,
-        stripExif,
       });
 
       showToast(`모자이크 사본이 저장되었습니다: ${savedPath}`);
@@ -657,14 +655,7 @@ export function MosaicEditorModal({
             </div>
 
             <div className="mosaic-panel-section">
-              <label className="checkbox-label">
-                <input
-                  type="checkbox"
-                  checked={stripExif}
-                  onChange={(e) => setStripExif(e.target.checked)}
-                />
-                <span>EXIF 개인정보(촬영위치·기기) 완전 제거 (권장)</span>
-              </label>
+              <p className="slider-hint">저장한 사본에는 EXIF·AI 프롬프트 등 메타데이터가 포함되지 않습니다.</p>
             </div>
 
             <div className="mosaic-footer-actions">

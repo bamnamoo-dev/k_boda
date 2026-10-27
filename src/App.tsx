@@ -453,8 +453,6 @@ function App() {
   const [saveAsTargetPath, setSaveAsTargetPath] = useState("");
   const [saveAsFormat, setSaveAsFormat] = useState<"jpg" | "png" | "webp" | "bmp">("jpg");
   const [saveAsQuality, setSaveAsQuality] = useState(90);
-  const [saveAsStripMetadata, setSaveAsStripMetadata] = useState(false);
-  const [saveAsStripAiPrompt, setSaveAsStripAiPrompt] = useState(false);
   const [saveAsResizeW, setSaveAsResizeW] = useState<number | undefined>(undefined);
   const [saveAsResizeH, setSaveAsResizeH] = useState<number | undefined>(undefined);
 
@@ -1845,8 +1843,6 @@ function App() {
     setSaveAsFormat(initFmt);
     setSaveAsTargetPath(`${baseWithoutExt}_copy.${initFmt}`);
     setSaveAsQuality(90);
-    setSaveAsStripMetadata(false);
-    setSaveAsStripAiPrompt(false);
     setSaveAsResizeW(prefillW);
     setSaveAsResizeH(prefillH);
     setShowSaveAsModal(true);
@@ -1911,8 +1907,6 @@ function App() {
           rotation,
           flipH,
           flipV,
-          stripMetadata: saveAsStripMetadata,
-          stripAiPrompt: saveAsStripAiPrompt,
           resizeWidth: saveAsResizeW && saveAsResizeW > 0 ? saveAsResizeW : null,
           resizeHeight: saveAsResizeH && saveAsResizeH > 0 ? saveAsResizeH : null,
         });
@@ -1930,8 +1924,6 @@ function App() {
     rotation,
     flipH,
     flipV,
-    saveAsStripMetadata,
-    saveAsStripAiPrompt,
     saveAsResizeW,
     saveAsResizeH,
     activeCrop,
@@ -5378,24 +5370,7 @@ function App() {
 
               <div className="form-group">
                 <label className="form-label">메타데이터 옵션</label>
-                <div style={{ display: "flex", flexDirection: "column", gap: "6px" }}>
-                  <label className="checkbox-container">
-                    <input
-                      type="checkbox"
-                      checked={saveAsStripMetadata}
-                      onChange={(e) => setSaveAsStripMetadata(e.target.checked)}
-                    />
-                    <span className="checkbox-text">EXIF 메타데이터 제거 (개인정보 보호)</span>
-                  </label>
-                  <label className="checkbox-container">
-                    <input
-                      type="checkbox"
-                      checked={saveAsStripAiPrompt}
-                      onChange={(e) => setSaveAsStripAiPrompt(e.target.checked)}
-                    />
-                    <span className="checkbox-text">AI 생성 프롬프트 / 파라미터 정보 제거</span>
-                  </label>
-                </div>
+                <p className="setting-hint">저장한 사본에는 EXIF·AI 프롬프트 등 메타데이터가 포함되지 않습니다.</p>
               </div>
 
               {(rotation !== 0 || flipH || flipV || (saveAsResizeW && saveAsResizeW > 0)) && (

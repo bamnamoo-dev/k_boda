@@ -417,7 +417,6 @@ export function PhotoStampModal({
         await invoke("save_edited_image", {
           base64Data: dataUrl,
           targetPath,
-          stripExif: false,
         });
       }
 

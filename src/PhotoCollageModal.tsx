@@ -351,7 +351,6 @@ export function PhotoCollageModal({
       const savedPath = await invoke<string>("save_edited_image", {
         base64Data: dataUrl,
         targetPath,
-        stripExif: false,
       });
 
       showToast(`사진 합치기 결과가 저장되었습니다: ${savedPath}`);
