@@ -661,6 +661,8 @@ export const IdPhotoEditor: React.FC<IdPhotoEditorProps> = ({
           >
             <img
               ref={imgRef}
+              // 얼굴 인식(WebGL)이 asset 이미지 픽셀을 읽을 수 있도록 교차 출처 허용 요청
+              crossOrigin="anonymous"
               src={convertFileSrc(currentPath)}
               alt="Source"
               className="id-photo-image"
